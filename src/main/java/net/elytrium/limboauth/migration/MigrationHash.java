@@ -31,57 +31,57 @@ public enum MigrationHash {
 
   AUTHME((hash, password) -> {
     String[] args = hash.split("\\$"); // $SHA$salt$hash
-    return args.length == 4 && args[3].equals(getDigest(getDigest(password, "SHA-256") + args[2], "SHA-256"));
+    return args.length == 4 && constantTimeEquals(args[3], getDigest(getDigest(password, "SHA-256") + args[2], "SHA-256"));
   }),
   AUTHME_NP((hash, password) -> {
     String[] args = hash.split("\\$"); // SHA$salt$hash
-    return args.length == 3 && args[2].equals(getDigest(getDigest(password, "SHA-256") + args[1], "SHA-256"));
+    return args.length == 3 && constantTimeEquals(args[2], getDigest(getDigest(password, "SHA-256") + args[1], "SHA-256"));
   }),
   ARGON2(new Argon2Verifier()),
   SHA512_DBA((hash, password) -> {
     String[] args = hash.split("\\$"); // SHA$salt$hash
-    return args.length == 3 && args[2].equals(getDigest(getDigest(password, "SHA-512") + args[1], "SHA-512"));
+    return args.length == 3 && constantTimeEquals(args[2], getDigest(getDigest(password, "SHA-512") + args[1], "SHA-512"));
   }),
   SHA512_NP((hash, password) -> {
     String[] args = hash.split("\\$"); // SHA$salt$hash
-    return args.length == 3 && args[2].equals(getDigest(password + args[1], "SHA-512"));
+    return args.length == 3 && constantTimeEquals(args[2], getDigest(password + args[1], "SHA-512"));
   }),
   SHA512_P((hash, password) -> {
     String[] args = hash.split("\\$"); // $SHA$salt$hash
-    return args.length == 4 && args[3].equals(getDigest(password + args[2], "SHA-512"));
+    return args.length == 4 && constantTimeEquals(args[3], getDigest(password + args[2], "SHA-512"));
   }),
   SHA256_NP((hash, password) -> {
     String[] args = hash.split("\\$"); // SHA$salt$hash
-    return args.length == 3 && args[2].equals(getDigest(password + args[1], "SHA-256"));
+    return args.length == 3 && constantTimeEquals(args[2], getDigest(password + args[1], "SHA-256"));
   }),
   SHA256_P((hash, password) -> {
     String[] args = hash.split("\\$"); // $SHA$salt$hash
-    return args.length == 4 && args[3].equals(getDigest(password + args[2], "SHA-256"));
+    return args.length == 4 && constantTimeEquals(args[3], getDigest(password + args[2], "SHA-256"));
   }),
-  MD5((hash, password) -> hash.equals(getDigest(password, "MD5"))),
+  MD5((hash, password) -> constantTimeEquals(hash, getDigest(password, "MD5"))),
   MOON_SHA256((hash, password) -> {
     String[] args = hash.split("\\$"); // $SHA$hash
-    return args.length == 3 && args[2].equals(getDigest(getDigest(password, "SHA-256"), "SHA-256"));
+    return args.length == 3 && constantTimeEquals(args[2], getDigest(getDigest(password, "SHA-256"), "SHA-256"));
   }),
   SHA256_NO_SALT((hash, password) -> {
     String[] args = hash.split("\\$"); // $SHA$hash
-    return args.length == 3 && args[2].equals(getDigest(password, "SHA-256"));
+    return args.length == 3 && constantTimeEquals(args[2], getDigest(password, "SHA-256"));
   }),
   SHA512_NO_SALT((hash, password) -> {
     String[] args = hash.split("\\$"); // $SHA$hash
-    return args.length == 3 && args[2].equals(getDigest(password, "SHA-512"));
+    return args.length == 3 && constantTimeEquals(args[2], getDigest(password, "SHA-512"));
   }),
   SHA512_P_REVERSED_HASH((hash, password) -> {
     String[] args = hash.split("\\$"); // $SHA$hash$salt
-    return args.length == 4 && args[2].equals(getDigest(password + args[3], "SHA-512"));
+    return args.length == 4 && constantTimeEquals(args[2], getDigest(password + args[3], "SHA-512"));
   }),
   SHA512_NLOGIN((hash, password) -> {
     String[] args = hash.split("\\$"); // $SHA$hash$salt
-    return args.length == 4 && args[2].equals(getDigest(getDigest(password, "SHA-512") + args[3], "SHA-512"));
+    return args.length == 4 && constantTimeEquals(args[2], getDigest(getDigest(password, "SHA-512") + args[3], "SHA-512"));
   }),
   @SuppressWarnings("UnstableApiUsage")
-  CRC32C((hash, password) -> hash.equals(Hashing.crc32c().hashString(password, StandardCharsets.UTF_8).toString())),
-  PLAINTEXT(String::equals);
+  CRC32C((hash, password) -> constantTimeEquals(hash, Hashing.crc32c().hashString(password, StandardCharsets.UTF_8).toString())),
+  PLAINTEXT(MigrationHash::constantTimeEquals);
 
   private final MigrationHashVerifier verifier;
 
@@ -91,6 +91,12 @@ public enum MigrationHash {
 
   public boolean checkPassword(String hash, String password) {
     return this.verifier.checkPassword(hash, password);
+  }
+
+  // Compares the stored hash (or plaintext) with the computed value in constant time, so password
+  // verification doesn't leak how many leading characters matched via a timing side channel.
+  private static boolean constantTimeEquals(String expected, String actual) {
+    return MessageDigest.isEqual(expected.getBytes(StandardCharsets.UTF_8), actual.getBytes(StandardCharsets.UTF_8));
   }
 
   private static String getDigest(String string, String algorithm) {

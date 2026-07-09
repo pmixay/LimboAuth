@@ -27,7 +27,7 @@ import dev.samstevens.totp.code.DefaultCodeGenerator;
 import dev.samstevens.totp.code.DefaultCodeVerifier;
 import dev.samstevens.totp.time.SystemTimeProvider;
 import io.netty.buffer.ByteBuf;
-import io.whitfin.siphash.SipHasher;
+import io.whitfin.siphash.SipHash;
 import java.nio.charset.StandardCharsets;
 import java.sql.SQLException;
 import java.text.MessageFormat;
@@ -313,7 +313,7 @@ public class AuthSessionHandler implements LimboSessionHandler {
         }
 
         byte[] lowercaseNicknameSerialized = this.playerInfo.getLowercaseNickname().getBytes(StandardCharsets.UTF_8);
-        long correctHash = SipHasher.init(Settings.IMP.MAIN.MOD.VERIFY_KEY)
+        long correctHash = SipHash.init(Settings.IMP.MAIN.MOD.VERIFY_KEY)
             .update(lowercaseNicknameSerialized)
             .update(Longs.toByteArray(issueTime))
             .digest();

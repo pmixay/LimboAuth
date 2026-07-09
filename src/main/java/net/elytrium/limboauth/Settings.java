@@ -18,13 +18,12 @@
 package net.elytrium.limboauth;
 
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.security.SecureRandom;
 import java.util.List;
-import java.util.Random;
-import java.util.concurrent.ThreadLocalRandom;
 import net.elytrium.commons.config.ConfigSerializer;
 import net.elytrium.commons.config.YamlConfig;
 import net.elytrium.commons.kyori.serialization.Serializers;
@@ -321,7 +320,8 @@ public class Settings extends YamlConfig {
       public boolean ENABLED = false;
 
       @Comment("Backend API token")
-      public String TOKEN = Long.toString(ThreadLocalRandom.current().nextLong(Long.MAX_VALUE), 36);
+      // Generated with a CSPRNG (~130 bits): this token authenticates the plugin's responses to backend servers.
+      public String TOKEN = new BigInteger(130, new SecureRandom()).toString(36);
 
       @Comment({
           "Available endpoints:",
@@ -526,7 +526,7 @@ public class Settings extends YamlConfig {
   public static class MD5KeySerializer extends ConfigSerializer<byte[], String> {
 
     private final MessageDigest md5;
-    private final Random random;
+    private final SecureRandom random;
     private String originalValue;
 
     @SuppressFBWarnings("CT_CONSTRUCTOR_THROW")
@@ -547,6 +547,12 @@ public class Settings extends YamlConfig {
 
     @Override
     public byte[] deserialize(String from) {
+      // An empty key would make the mod session-token digest MD5("") — a publicly known constant —
+      // which, with mod auto-login enabled, would let anyone forge auto-login tokens. Generate one instead.
+      if (from == null || from.isEmpty()) {
+        from = generateRandomString(24);
+      }
+
       this.originalValue = from;
       return this.md5.digest(from.getBytes(StandardCharsets.UTF_8));
     }

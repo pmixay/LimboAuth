@@ -4,17 +4,17 @@ plugins {
     id("java")
     id("checkstyle")
     id("maven-publish")
-    id("com.github.spotbugs").version("6.1.7")
+    id("com.github.spotbugs").version("6.5.8")
     id("org.cadixdev.licenser").version("0.6.1")
-    id("com.gradleup.shadow").version("8.3.6")
+    id("com.gradleup.shadow").version("9.4.3")
 }
 
 setGroup("net.elytrium")
 setVersion("1.1.14")
 
 java {
-    setSourceCompatibility(JavaVersion.VERSION_17)
-    setTargetCompatibility(JavaVersion.VERSION_17)
+    setSourceCompatibility(JavaVersion.VERSION_21)
+    setTargetCompatibility(JavaVersion.VERSION_21)
 }
 
 compileJava {
@@ -24,17 +24,23 @@ compileJava {
 repositories {
     mavenCentral()
 
-    maven {
-        setName("elytrium-repo")
-        setUrl("https://maven.elytrium.net/repo/")
-    }
+    // PaperMC must be declared before the Elytrium repo: both serve velocity-api snapshots,
+    // but the Elytrium mirror lags behind and would otherwise shadow the up-to-date builds.
     maven {
         setName("papermc-repo")
         setUrl("https://repo.papermc.io/repository/maven-public/")
     }
     maven {
+        setName("elytrium-repo")
+        setUrl("https://maven.elytrium.net/repo/")
+    }
+    maven {
         setName("opencollab-snapshot")
         setUrl("https://repo.opencollab.dev/maven-snapshots")
+    }
+    maven {
+        setName("opencollab-release")
+        setUrl("https://repo.opencollab.dev/maven-releases")
     }
 }
 
@@ -55,13 +61,13 @@ dependencies {
 
     compileOnly("org.geysermc.floodgate:api:$floodgateVersion")
 
-    implementation("at.favre.lib:bcrypt:0.9.0")
+    implementation("at.favre.lib:bcrypt:0.10.2")
     implementation("dev.samstevens.totp:totp:1.7.1")
 
     implementation("com.j256.ormlite:ormlite-jdbc:6.1")
-    implementation("de.mkammerer:argon2-jvm-nolibs:2.11")
+    implementation("de.mkammerer:argon2-jvm-nolibs:2.12")
 
-    implementation("io.whitfin:siphash:2.0.0")
+    implementation("io.whitfin:siphash:3.0.0")
 
     implementation("org.bstats:bstats-velocity:$bstatsVersion")
 
@@ -124,7 +130,7 @@ license {
 }
 
 checkstyle {
-    setToolVersion("10.1")
+    setToolVersion("13.7.0")
     setConfigFile(file("${this.getRootDir()}/config/checkstyle/checkstyle.xml"))
     setConfigProperties("configDirectory": "${this.getRootDir()}/config/checkstyle")
 
@@ -139,7 +145,7 @@ spotbugsMain {
     reports {
         html {
             getRequired().set(true)
-            getOutputLocation().set(file("${this.getBuildDir()}/reports/spotbugs/main/spotbugs.html"))
+            getOutputLocation().set(getLayout().getBuildDirectory().file("reports/spotbugs/main/spotbugs.html"))
             setStylesheet("fancy-hist.xsl")
         }
     }
@@ -181,13 +187,8 @@ publishing {
 javadoc {
     getOptions().setEncoding("UTF-8")
     getOptions().setCharSet("UTF-8")
-    getOptions().setSource("17")
-    getOptions().links("https://docs.oracle.com/en/java/javase/11/docs/api/")
-
-    // Remove "undefined" from search paths when generating javadoc for a non-modular project. (JDK-8215291)
-    if (JavaVersion.current() == JavaVersion.VERSION_11) {
-        getOptions().addBooleanOption("-no-module-directories", true)
-    }
+    getOptions().setSource("21")
+    getOptions().links("https://docs.oracle.com/en/java/javase/21/docs/api/")
 }
 
 artifacts {
@@ -211,16 +212,8 @@ sourceSets.main.getJava().srcDir(
 assemble.dependsOn(shadowJar)
 
 String getCurrentShortRevision() {
-    OutputStream outputStream = new ByteArrayOutputStream()
-    exec {
-        if (System.getProperty("os.name").toLowerCase().contains("win")) {
-            commandLine("cmd", "/c", "git rev-parse --short HEAD")
-        } else {
-            commandLine("bash", "-c", "git rev-parse --short HEAD")
-        }
-
-        setStandardOutput(outputStream)
-    }
-
-    return outputStream.toString().trim()
+    // Project.exec() was removed in Gradle 9, use the provider-based API instead.
+    return getProviders().exec {
+        commandLine("git", "rev-parse", "--short", "HEAD")
+    }.getStandardOutput().getAsText().get().trim()
 }

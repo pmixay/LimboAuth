@@ -22,6 +22,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.net.MalformedURLException;
 import java.net.URL;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
@@ -35,27 +36,27 @@ public enum BaseLibrary {
   H2_V2(
       "com.h2database",
       "h2",
-      "2.1.214"
+      "2.4.240"
   ),
   MYSQL(
       "com.mysql",
       "mysql-connector-j",
-      "8.0.33"
+      "9.7.0"
   ),
   MARIADB(
       "org.mariadb.jdbc",
       "mariadb-java-client",
-      "3.1.4"
+      "3.5.9"
   ),
   POSTGRESQL(
       "org.postgresql",
       "postgresql",
-      "42.5.1"
+      "42.7.13"
   ),
   SQLITE(
       "org.xerial",
       "sqlite-jdbc",
-      "3.40.0.0"
+      "3.53.2.0"
   );
 
   private final Path filenamePath;
@@ -83,9 +84,20 @@ public enum BaseLibrary {
   public URL getClassLoaderURL() throws MalformedURLException {
     if (!Files.exists(this.filenamePath)) {
       try {
+        Files.createDirectories(this.filenamePath.getParent());
+
+        // Download to a temporary file first, so an interrupted download can't leave
+        // a truncated jar at the final path that would be treated as valid forever.
+        Path tempFile = Files.createTempFile(this.filenamePath.getParent(), this.filenamePath.getFileName().toString(), ".tmp");
         try (InputStream in = this.mavenRepoURL.openStream()) {
-          Files.createDirectories(this.filenamePath.getParent());
-          Files.copy(in, Files.createFile(this.filenamePath), StandardCopyOption.REPLACE_EXISTING);
+          Files.copy(in, tempFile, StandardCopyOption.REPLACE_EXISTING);
+          try {
+            Files.move(tempFile, this.filenamePath, StandardCopyOption.ATOMIC_MOVE);
+          } catch (AtomicMoveNotSupportedException e) {
+            Files.move(tempFile, this.filenamePath, StandardCopyOption.REPLACE_EXISTING);
+          }
+        } finally {
+          Files.deleteIfExists(tempFile);
         }
       } catch (IOException e) {
         throw new IllegalArgumentException(e);
