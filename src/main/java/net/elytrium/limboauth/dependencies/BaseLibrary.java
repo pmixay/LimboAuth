@@ -35,27 +35,27 @@ public enum BaseLibrary {
   H2_V2(
       "com.h2database",
       "h2",
-      "2.1.214"
+      "2.4.240"
   ),
   MYSQL(
       "com.mysql",
       "mysql-connector-j",
-      "8.0.33"
+      "9.7.0"
   ),
   MARIADB(
       "org.mariadb.jdbc",
       "mariadb-java-client",
-      "3.1.4"
+      "3.5.9"
   ),
   POSTGRESQL(
       "org.postgresql",
       "postgresql",
-      "42.5.1"
+      "42.7.13"
   ),
   SQLITE(
       "org.xerial",
       "sqlite-jdbc",
-      "3.40.0.0"
+      "3.53.2.0"
   );
 
   private final Path filenamePath;

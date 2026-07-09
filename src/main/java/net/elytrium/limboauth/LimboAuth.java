@@ -51,7 +51,7 @@ import com.velocitypowered.api.scheduler.ScheduledTask;
 import com.velocitypowered.proxy.util.ratelimit.Ratelimiter;
 import com.velocitypowered.proxy.util.ratelimit.Ratelimiters;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
-import io.whitfin.siphash.SipHasher;
+import io.whitfin.siphash.SipHash;
 import java.io.File;
 import java.io.IOException;
 import java.net.InetAddress;
@@ -240,7 +240,6 @@ public class LimboAuth {
     }).schedule();
   }
 
-  @SuppressFBWarnings(value = "NP_NULL_ON_SOME_PATH", justification = "LEGACY_AMPERSAND can't be null in velocity.")
   public void reload() {
     Settings.IMP.reload(this.configFile, Settings.IMP.PREFIX);
 
@@ -688,7 +687,7 @@ public class LimboAuth {
     if (Settings.IMP.MAIN.MOD.ENABLED) {
       byte[] lowercaseNicknameSerialized = lowercaseNickname.getBytes(StandardCharsets.UTF_8);
       long issueTime = System.currentTimeMillis();
-      long hash = SipHasher.init(Settings.IMP.MAIN.MOD.VERIFY_KEY)
+      long hash = SipHash.init(Settings.IMP.MAIN.MOD.VERIFY_KEY)
           .update(lowercaseNicknameSerialized)
           .update(Longs.toByteArray(issueTime))
           .digest();
