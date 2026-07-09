@@ -1,0 +1,159 @@
+/*
+ * Copyright (C) 2021 - 2025 Elytrium
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+package net.elytrium.limboauth.protection.aggregate;
+
+import java.util.Iterator;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import net.elytrium.limboauth.Settings;
+import net.elytrium.limboauth.protection.AttemptObservation;
+import net.elytrium.limboauth.protection.AttemptOutcome;
+
+/**
+ * Sliding-window aggregates keyed by IP, subnet, account and password fingerprint.
+ * All mutation happens on the single protection executor thread; the maps are concurrent
+ * only so that admin commands can read sizes from other threads.
+ */
+public class ProtectionAggregator {
+
+  private final Map<String, ActivityWindow> ipWindows = new ConcurrentHashMap<>();
+  private final Map<String, ActivityWindow> subnetWindows = new ConcurrentHashMap<>();
+  private final Map<String, ActivityWindow> accountWindows = new ConcurrentHashMap<>();
+  private final Map<Long, ActivityWindow> fingerprintWindows = new ConcurrentHashMap<>();
+  private final Map<String, Long> flaggedSources = new ConcurrentHashMap<>();
+
+  public void update(AttemptObservation observation) {
+    Settings.PROTECTION.WINDOWS windows = Settings.IMP.PROTECTION.WINDOWS;
+    int maxEvents = windows.MAX_EVENTS_PER_WINDOW;
+
+    boolean churn = observation.getOutcome() == AttemptOutcome.SESSION_END
+        && observation.getMillisSinceJoin() < windows.CHURN_SESSION_MILLIS
+        && observation.getSessionAttempts() >= 1
+        && observation.getSessionAttempts() <= windows.CHURN_MAX_ATTEMPTS;
+
+    ActivityWindow.AttemptEvent event = new ActivityWindow.AttemptEvent(
+        observation.getTimestamp(),
+        observation.getLowercaseNickname(),
+        observation.isAccountExists(),
+        observation.getIpString(),
+        observation.getOutcome(),
+        churn
+    );
+
+    this.windowFor(this.ipWindows, observation.getIpString(), windows.MAX_TRACKED_IPS).add(event, maxEvents);
+    this.windowFor(this.subnetWindows, observation.getSubnetKey(), windows.MAX_TRACKED_SUBNETS).add(event, maxEvents);
+
+    if (observation.getOutcome() != AttemptOutcome.SESSION_END) {
+      if (observation.isAccountExists()) {
+        this.windowFor(this.accountWindows, observation.getLowercaseNickname(), windows.MAX_TRACKED_ACCOUNTS).add(event, maxEvents);
+      }
+
+      if (observation.hasFingerprint()) {
+        this.windowFor(this.fingerprintWindows, observation.getPasswordFingerprint(), windows.MAX_TRACKED_FINGERPRINTS).add(event, maxEvents);
+      }
+    }
+  }
+
+  public AggregateSnapshot snapshot(AttemptObservation observation) {
+    long now = observation.getTimestamp();
+    long volumeSince = now - Settings.IMP.PROTECTION.WINDOWS.VOLUME_WINDOW_MILLIS;
+    long distributionSince = now - Settings.IMP.PROTECTION.WINDOWS.DISTRIBUTION_WINDOW_MILLIS;
+
+    ActivityWindow ipWindow = this.ipWindows.get(observation.getIpString());
+    ActivityWindow subnetWindow = this.subnetWindows.get(observation.getSubnetKey());
+    ActivityWindow accountWindow = observation.isAccountExists() ? this.accountWindows.get(observation.getLowercaseNickname()) : null;
+    ActivityWindow fingerprintWindow = observation.hasFingerprint() ? this.fingerprintWindows.get(observation.getPasswordFingerprint()) : null;
+
+    return new AggregateSnapshot(
+        ipWindow == null ? 0 : ipWindow.countFails(volumeSince),
+        ipWindow == null ? 0 : ipWindow.distinctFailedExistingTargets(volumeSince),
+        ipWindow == null ? 0 : ipWindow.countChurnSessions(volumeSince),
+        subnetWindow == null ? 0 : subnetWindow.distinctFailedExistingTargets(volumeSince),
+        subnetWindow == null ? 0 : subnetWindow.distinctIps(volumeSince),
+        subnetWindow == null ? 0 : subnetWindow.countChurnSessions(volumeSince),
+        accountWindow == null ? 0 : accountWindow.distinctFailIps(distributionSince),
+        accountWindow == null ? 0 : accountWindow.countFailsFromOtherIps(distributionSince, observation.getIpString()),
+        fingerprintWindow == null ? 0 : fingerprintWindow.distinctFingerprintTargets(distributionSince),
+        this.isFlagged(observation.getIpString(), now)
+    );
+  }
+
+  public void markFlagged(String ip, long untilTime) {
+    this.flaggedSources.merge(ip, untilTime, Math::max);
+  }
+
+  public boolean isFlagged(String ip, long now) {
+    Long until = this.flaggedSources.get(ip);
+    return until != null && until > now;
+  }
+
+  public void purge(long now) {
+    long horizon = now - Math.max(Settings.IMP.PROTECTION.WINDOWS.VOLUME_WINDOW_MILLIS, Settings.IMP.PROTECTION.WINDOWS.DISTRIBUTION_WINDOW_MILLIS);
+    this.purgeWindows(this.ipWindows, horizon);
+    this.purgeWindows(this.subnetWindows, horizon);
+    this.purgeWindows(this.accountWindows, horizon);
+    this.purgeWindows(this.fingerprintWindows, horizon);
+    this.flaggedSources.values().removeIf(until -> until <= now);
+  }
+
+  public int getTrackedIps() {
+    return this.ipWindows.size();
+  }
+
+  public int getTrackedSubnets() {
+    return this.subnetWindows.size();
+  }
+
+  public int getTrackedAccounts() {
+    return this.accountWindows.size();
+  }
+
+  public int getTrackedFingerprints() {
+    return this.fingerprintWindows.size();
+  }
+
+  public int getFlaggedSources() {
+    return this.flaggedSources.size();
+  }
+
+  private <K> ActivityWindow windowFor(Map<K, ActivityWindow> windows, K key, int maxTracked) {
+    ActivityWindow window = windows.get(key);
+    if (window == null) {
+      // Flood backstop: evict an arbitrary entry above the cap so memory stays bounded.
+      while (windows.size() >= maxTracked) {
+        Iterator<K> iterator = windows.keySet().iterator();
+        if (iterator.hasNext()) {
+          iterator.next();
+          iterator.remove();
+        } else {
+          break;
+        }
+      }
+
+      window = new ActivityWindow();
+      windows.put(key, window);
+    }
+
+    return window;
+  }
+
+  private <K> void purgeWindows(Map<K, ActivityWindow> windows, long horizon) {
+    windows.values().forEach(window -> window.trim(horizon));
+    windows.values().removeIf(window -> window.isEmpty() && window.getLastTouched() < horizon);
+  }
+}

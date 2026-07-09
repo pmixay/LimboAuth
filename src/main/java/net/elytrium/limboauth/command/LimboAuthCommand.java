@@ -40,6 +40,7 @@ public class LimboAuthCommand extends RatelimitedCommand {
 
   private static final Component AVAILABLE_SUBCOMMANDS_MESSAGE = Component.text("Available subcommands:", NamedTextColor.WHITE);
   private static final Component NO_AVAILABLE_SUBCOMMANDS_MESSAGE = Component.text("There is no available subcommands for you.", NamedTextColor.WHITE);
+  private static final List<String> PROTECTION_SUBCOMMANDS = List.of("status", "stats", "recent", "test-webhook");
 
   private final LimboAuth plugin;
 
@@ -62,6 +63,11 @@ public class LimboAuthCommand extends RatelimitedCommand {
       return Arrays.stream(Subcommand.values())
           .filter(command -> command.hasPermission(source))
           .map(Subcommand::getCommand)
+          .filter(str -> str.regionMatches(true, 0, argument, 0, argument.length()))
+          .collect(Collectors.toList());
+    } else if (args.length == 2 && args[0].equalsIgnoreCase(Subcommand.PROTECTION.getCommand()) && Subcommand.PROTECTION.hasPermission(source)) {
+      String argument = args[1];
+      return PROTECTION_SUBCOMMANDS.stream()
           .filter(str -> str.regionMatches(true, 0, argument, 0, argument.length()))
           .collect(Collectors.toList());
     } else {
@@ -115,7 +121,10 @@ public class LimboAuthCommand extends RatelimitedCommand {
         (LimboAuthCommand parent, CommandSource source, String[] args) -> {
           parent.plugin.reload();
           source.sendMessage(LimboAuth.getSerializer().deserialize(Settings.IMP.MAIN.STRINGS.RELOAD));
-        });
+        }),
+    PROTECTION("Account protection status & stats.", Settings.IMP.MAIN.COMMAND_PERMISSION_STATE.PROTECTION,
+        (LimboAuthCommand parent, CommandSource source, String[] args) ->
+            parent.plugin.getProtectionManager().handleCommand(source, args));
 
     private final String command;
     private final String description;

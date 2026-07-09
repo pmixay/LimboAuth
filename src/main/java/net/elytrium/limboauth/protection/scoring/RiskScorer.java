@@ -1,0 +1,250 @@
+/*
+ * Copyright (C) 2021 - 2025 Elytrium
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+package net.elytrium.limboauth.protection.scoring;
+
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Set;
+import java.util.regex.Pattern;
+import java.util.regex.PatternSyntaxException;
+import net.elytrium.limboauth.Settings;
+import net.elytrium.limboauth.protection.AttemptObservation;
+import net.elytrium.limboauth.protection.AttemptOutcome;
+import net.elytrium.limboauth.protection.Severity;
+import net.elytrium.limboauth.protection.aggregate.AggregateSnapshot;
+import net.elytrium.limboauth.protection.geoip.GeoIpResult;
+import org.checkerframework.checker.nullness.qual.Nullable;
+
+/**
+ * Weighted additive risk scoring with per-category caps.
+ *
+ * <p>Low-FPR properties: BEHAVIOR and GEO are capped so they can never reach the HIGH
+ * threshold alone, HIGH structurally requires at least two independent categories,
+ * and the CRITICAL-tier confirmation factors only fire on signals a legitimate player
+ * cannot produce alone (e.g. failures from OTHER IPs preceding a success).
+ */
+public class RiskScorer {
+
+  private volatile List<String> brandRegexSource;
+  private volatile List<Pattern> brandPatterns = List.of();
+  private volatile List<String> hostingAsnSource;
+  private volatile Set<Long> hostingAsns = Set.of();
+
+  public RiskAssessment score(AttemptObservation observation, AggregateSnapshot snapshot,
+                              @Nullable GeoIpResult currentGeo, @Nullable String storedCountryIso) {
+    Settings.PROTECTION.SCORING scoring = Settings.IMP.PROTECTION.SCORING;
+    Settings.PROTECTION.SCORING.WEIGHTS weights = scoring.WEIGHTS;
+    List<FactorContribution> contributions = new ArrayList<>();
+
+    int volume = 0;
+    volume += this.tiered(contributions, RiskFactor.IP_FAIL_RATE, snapshot.ipFailures(),
+        new int[] {20, 10, 6}, new int[] {weights.IP_FAIL_RATE_20, weights.IP_FAIL_RATE_10, weights.IP_FAIL_RATE_6},
+        snapshot.ipFailures() + " failed logins from this IP in the volume window");
+    volume += this.tiered(contributions, RiskFactor.IP_DISTINCT_TARGETS, snapshot.ipDistinctFailedTargets(),
+        new int[] {10, 5, 3}, new int[] {weights.IP_DISTINCT_TARGETS_10, weights.IP_DISTINCT_TARGETS_5, weights.IP_DISTINCT_TARGETS_3},
+        snapshot.ipDistinctFailedTargets() + " distinct accounts failed from this IP in the volume window");
+    if (snapshot.subnetDistinctIps() >= 2) {
+      volume += this.tiered(contributions, RiskFactor.SUBNET_DISTINCT_TARGETS, snapshot.subnetDistinctFailedTargets(),
+          new int[] {10, 5}, new int[] {weights.SUBNET_DISTINCT_TARGETS_10, weights.SUBNET_DISTINCT_TARGETS_5},
+          snapshot.subnetDistinctFailedTargets() + " distinct accounts failed from this subnet ("
+              + snapshot.subnetDistinctIps() + " source IPs) in the volume window");
+    }
+
+    int distribution = 0;
+    distribution += this.tiered(contributions, RiskFactor.ACCOUNT_DISTINCT_IPS, snapshot.accountDistinctFailIps(),
+        new int[] {4, 2}, new int[] {weights.ACCOUNT_DISTINCT_IPS_4, weights.ACCOUNT_DISTINCT_IPS_2},
+        "this account failed from " + snapshot.accountDistinctFailIps() + " distinct IPs in the distribution window");
+    distribution += this.tiered(contributions, RiskFactor.PASSWORD_SPRAY, snapshot.fingerprintDistinctTargets(),
+        new int[] {8, 3}, new int[] {weights.PASSWORD_SPRAY_8, weights.PASSWORD_SPRAY_3},
+        "the same password was tried against " + snapshot.fingerprintDistinctTargets() + " distinct accounts");
+    int churnSessions = Math.max(snapshot.ipChurnSessions(), snapshot.subnetChurnSessions());
+    distribution += this.tiered(contributions, RiskFactor.CHURN_SESSIONS, churnSessions,
+        new int[] {3}, new int[] {weights.CHURN_SESSIONS_3},
+        churnSessions + " short join-attempt-quit sessions from this source in the volume window");
+
+    int behavior = 0;
+    if (!(observation.isFloodgate() && scoring.SKIP_BEHAVIOR_FOR_FLOODGATE)) {
+      if (observation.isFirstAttemptOfSession() && observation.getMillisSinceJoin() < scoring.FAST_FIRST_COMMAND_MILLIS) {
+        behavior += this.add(contributions, RiskFactor.INSTANT_FIRST_COMMAND, weights.INSTANT_FIRST_COMMAND,
+            "first command " + observation.getMillisSinceJoin() + "ms after spawn");
+      }
+
+      String brand = observation.getClientBrand();
+      if (brand == null) {
+        behavior += this.add(contributions, RiskFactor.MISSING_BRAND, weights.MISSING_BRAND, "client sent no brand");
+      } else {
+        for (Pattern pattern : this.getBrandPatterns(scoring.SUSPICIOUS_BRANDS)) {
+          if (pattern.matcher(brand).matches()) {
+            behavior += this.add(contributions, RiskFactor.SUSPICIOUS_BRAND, weights.SUSPICIOUS_BRAND, "client brand \"" + brand + "\"");
+            break;
+          }
+        }
+      }
+    }
+
+    int geo = 0;
+    if (currentGeo != null) {
+      String currentCountry = currentGeo.countryIso();
+      if (currentCountry != null && storedCountryIso != null && !currentCountry.equalsIgnoreCase(storedCountryIso)) {
+        geo += this.add(contributions, RiskFactor.GEO_COUNTRY_MISMATCH, weights.GEO_COUNTRY_MISMATCH,
+            "login country " + currentCountry + " differs from last login country " + storedCountryIso);
+      }
+
+      if (this.isHostingAsn(currentGeo)) {
+        geo += this.add(contributions, RiskFactor.GEO_HOSTING_ASN, weights.GEO_HOSTING_ASN,
+            "hosting ASN " + currentGeo.asn() + " (" + currentGeo.asnOrganization() + ")");
+      }
+    }
+
+    int confirmation = 0;
+    if (observation.getOutcome() == AttemptOutcome.LOGIN_SUCCESS) {
+      if (snapshot.accountFailsFromOtherIps() >= 2) {
+        confirmation += this.add(contributions, RiskFactor.CONFIRM_SUCCESS_AFTER_DISTRIBUTED_FAILURES,
+            weights.CONFIRM_SUCCESS_AFTER_DISTRIBUTED_FAILURES,
+            "successful login after " + snapshot.accountFailsFromOtherIps() + " recent failures from OTHER IPs");
+      }
+
+      if (snapshot.sourceFlagged()) {
+        confirmation += this.add(contributions, RiskFactor.CONFIRM_SUCCESS_FROM_FLAGGED_SOURCE,
+            weights.CONFIRM_SUCCESS_FROM_FLAGGED_SOURCE, "successful login from a source flagged HIGH before this attempt");
+      }
+
+      if (snapshot.fingerprintDistinctTargets() >= 3) {
+        confirmation += this.add(contributions, RiskFactor.CONFIRM_SPRAYED_PASSWORD_SUCCESS,
+            weights.CONFIRM_SPRAYED_PASSWORD_SUCCESS,
+            "the successful password was sprayed against " + snapshot.fingerprintDistinctTargets() + " accounts");
+      }
+    }
+
+    int score = Math.min(volume, scoring.CAP_VOLUME)
+        + Math.min(distribution, scoring.CAP_DISTRIBUTION)
+        + Math.min(behavior, scoring.CAP_BEHAVIOR)
+        + Math.min(geo, scoring.CAP_GEO)
+        + confirmation;
+
+    Severity severity;
+    if (score >= scoring.THRESHOLD_CRITICAL) {
+      severity = Severity.CRITICAL;
+    } else if (score >= scoring.THRESHOLD_HIGH) {
+      severity = Severity.HIGH;
+    } else if (score >= scoring.THRESHOLD_SUSPICIOUS) {
+      severity = Severity.SUSPICIOUS;
+    } else if (score >= scoring.THRESHOLD_INFO) {
+      severity = Severity.INFO;
+    } else {
+      severity = Severity.NONE;
+    }
+
+    return new RiskAssessment(score, severity, List.copyOf(contributions), this.clusterKey(observation, contributions, confirmation > 0));
+  }
+
+  private String clusterKey(AttemptObservation observation, List<FactorContribution> contributions, boolean confirmed) {
+    boolean accountDistributed = contributions.stream().anyMatch(contribution -> contribution.factor() == RiskFactor.ACCOUNT_DISTINCT_IPS);
+    if (confirmed || accountDistributed) {
+      return "account:" + observation.getLowercaseNickname();
+    }
+
+    boolean spray = contributions.stream().anyMatch(contribution -> contribution.factor() == RiskFactor.PASSWORD_SPRAY);
+    if (spray && observation.hasFingerprint()) {
+      return "spray:" + Long.toHexString(observation.getPasswordFingerprint());
+    }
+
+    boolean subnetOnly = contributions.stream().allMatch(contribution -> contribution.factor() == RiskFactor.SUBNET_DISTINCT_TARGETS);
+    if (subnetOnly && !contributions.isEmpty()) {
+      return "subnet:" + observation.getSubnetKey();
+    }
+
+    return "ip:" + observation.getIpString();
+  }
+
+  private int tiered(List<FactorContribution> contributions, RiskFactor factor, int value, int[] thresholds, int[] weights, String detail) {
+    for (int i = 0; i < thresholds.length; ++i) {
+      if (value >= thresholds[i] && weights[i] > 0) {
+        contributions.add(new FactorContribution(factor, weights[i], detail));
+        return weights[i];
+      }
+    }
+
+    return 0;
+  }
+
+  private int add(List<FactorContribution> contributions, RiskFactor factor, int weight, String detail) {
+    if (weight <= 0) {
+      return 0;
+    }
+
+    contributions.add(new FactorContribution(factor, weight, detail));
+    return weight;
+  }
+
+  private boolean isHostingAsn(GeoIpResult geo) {
+    if (geo.asn() != null && this.getHostingAsns(Settings.IMP.PROTECTION.GEOIP.HOSTING_ASNS).contains(geo.asn())) {
+      return true;
+    }
+
+    String organization = geo.asnOrganization();
+    if (organization != null) {
+      String lowercase = organization.toLowerCase(Locale.ROOT);
+      for (String keyword : Settings.IMP.PROTECTION.GEOIP.HOSTING_ORG_KEYWORDS) {
+        if (lowercase.contains(keyword.toLowerCase(Locale.ROOT))) {
+          return true;
+        }
+      }
+    }
+
+    return false;
+  }
+
+  private List<Pattern> getBrandPatterns(List<String> source) {
+    if (source != this.brandRegexSource) {
+      List<Pattern> compiled = new ArrayList<>();
+      for (String regex : source) {
+        try {
+          compiled.add(Pattern.compile(regex));
+        } catch (PatternSyntaxException e) {
+          // Ignore invalid patterns instead of breaking the whole pipeline; the config is user-supplied.
+        }
+      }
+
+      this.brandPatterns = List.copyOf(compiled);
+      this.brandRegexSource = source;
+    }
+
+    return this.brandPatterns;
+  }
+
+  private Set<Long> getHostingAsns(List<String> source) {
+    if (source != this.hostingAsnSource) {
+      Set<Long> parsed = new HashSet<>();
+      for (String asn : source) {
+        try {
+          parsed.add(Long.parseLong(asn.trim()));
+        } catch (NumberFormatException e) {
+          // Ignore unparsable entries; the config is user-supplied.
+        }
+      }
+
+      this.hostingAsns = Set.copyOf(parsed);
+      this.hostingAsnSource = source;
+    }
+
+    return this.hostingAsns;
+  }
+}

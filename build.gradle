@@ -71,7 +71,23 @@ dependencies {
 
     implementation("org.bstats:bstats-velocity:$bstatsVersion")
 
+    // GeoLite2 database reader for the optional account protection GeoIP factors. Dependency-free.
+    implementation("com.maxmind.db:maxmind-db:$maxmindDbVersion")
+
     compileOnly("com.github.spotbugs:spotbugs-annotations:$spotbugsVersion")
+
+    testImplementation("org.junit.jupiter:junit-jupiter:$junitVersion")
+    testRuntimeOnly("org.junit.platform:junit-platform-launcher")
+    testImplementation("net.elytrium.limboapi:api:$limboapiVersion")
+    testImplementation("net.elytrium.commons:config:$elytriumCommonsVersion")
+    testImplementation("net.elytrium.commons:kyori:$elytriumCommonsVersion")
+    testImplementation("net.elytrium.commons:utils:$elytriumCommonsVersion")
+    testImplementation("com.velocitypowered:velocity-api:$velocityVersion")
+    testRuntimeOnly("com.h2database:h2:$h2TestVersion")
+}
+
+test {
+    useJUnitPlatform()
 }
 
 shadowJar {
@@ -113,6 +129,7 @@ shadowJar {
 
     relocate("at.favre.lib", "net.elytrium.limboauth.thirdparty.at.favre.lib")
     relocate("com.j256.ormlite", "net.elytrium.limboauth.thirdparty.com.j256.ormlite")
+    relocate("com.maxmind.db", "net.elytrium.limboauth.thirdparty.com.maxmind.db")
     relocate("com.sun.jna", "net.elytrium.limboauth.thirdparty.com.sun.jna") {
         exclude("com.sun.jna.Native") // For compatibility with native methods.
     }

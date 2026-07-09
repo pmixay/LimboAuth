@@ -43,12 +43,16 @@ import net.elytrium.limboapi.api.LimboSessionHandler;
 import net.elytrium.limboapi.api.player.LimboPlayer;
 import net.elytrium.limboauth.LimboAuth;
 import net.elytrium.limboauth.Settings;
+import net.elytrium.limboauth.event.FailedLoginAttemptEvent;
 import net.elytrium.limboauth.event.PostAuthorizationEvent;
 import net.elytrium.limboauth.event.PostRegisterEvent;
 import net.elytrium.limboauth.event.TaskEvent;
 import net.elytrium.limboauth.migration.MigrationHash;
 import net.elytrium.limboauth.model.RegisteredPlayer;
 import net.elytrium.limboauth.model.SQLRuntimeException;
+import net.elytrium.limboauth.protection.AttemptObservation;
+import net.elytrium.limboauth.protection.AttemptOutcome;
+import net.elytrium.limboauth.protection.ProtectionManager;
 import net.kyori.adventure.bossbar.BossBar;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.title.Title;
@@ -115,6 +119,9 @@ public class AuthSessionHandler implements LimboSessionHandler {
   private boolean totpState;
   private String tempPassword;
   private boolean tokenReceived;
+  @Nullable
+  private String clientBrand;
+  private int attemptsMade;
 
   public AuthSessionHandler(Dao<RegisteredPlayer, String> playerDao, Player proxyPlayer, LimboAuth plugin, @Nullable RegisteredPlayer playerInfo) {
     this.playerDao = playerDao;
@@ -224,6 +231,8 @@ public class AuthSessionHandler implements LimboSessionHandler {
             throw new SQLRuntimeException(e);
           }
 
+          this.recordAttempt(AttemptOutcome.REGISTER, password);
+
           this.proxyPlayer.sendMessage(registerSuccessful);
           if (registerSuccessfulTitle != null) {
             this.proxyPlayer.showTitle(registerSuccessfulTitle);
@@ -244,6 +253,9 @@ public class AuthSessionHandler implements LimboSessionHandler {
         this.saveTempPassword(password);
 
         if (password.length() > 0 && checkPassword(password, this.playerInfo, this.playerDao)) {
+          // Recorded before the TOTP gate: a correct password is a confirmed credential
+          // hit for an attacker even when 2FA still blocks the actual join.
+          this.recordAttempt(AttemptOutcome.LOGIN_SUCCESS, password);
           if (this.playerInfo.getTotpToken().isEmpty()) {
             this.finishLogin();
           } else {
@@ -251,9 +263,11 @@ public class AuthSessionHandler implements LimboSessionHandler {
             this.sendMessage(true);
           }
         } else if (--this.attempts != 0) {
+          this.recordFailedLoginAttempt(password);
           this.proxyPlayer.sendMessage(loginWrongPassword[this.attempts - 1]);
           this.checkBruteforceAttempts();
         } else {
+          this.recordFailedLoginAttempt(password);
           this.proxyPlayer.disconnect(loginWrongPasswordKick);
         }
 
@@ -263,6 +277,7 @@ public class AuthSessionHandler implements LimboSessionHandler {
           this.finishLogin();
           return;
         } else {
+          this.recordAttempt(AttemptOutcome.TOTP_FAIL, null);
           this.checkBruteforceAttempts();
         }
       }
@@ -273,17 +288,18 @@ public class AuthSessionHandler implements LimboSessionHandler {
 
   @Override
   public void onGeneric(Object packet) {
-    if (Settings.IMP.MAIN.MOD.ENABLED && packet instanceof PluginMessagePacket) {
+    if (packet instanceof PluginMessagePacket) {
       PluginMessagePacket pluginMessage = (PluginMessagePacket) packet;
       String channel = pluginMessage.getChannel();
 
       if (channel.equals("MC|Brand") || channel.equals("minecraft:brand")) {
+        this.clientBrand = readBrand(pluginMessage.content());
         // Minecraft can't handle the plugin message immediately after going to the PLAY
         // state, so we have to postpone sending it
         if (Settings.IMP.MAIN.MOD.ENABLED) {
           this.proxyPlayer.sendPluginMessage(this.plugin.getChannelIdentifier(this.proxyPlayer), new byte[0]);
         }
-      } else if (channel.equals(this.plugin.getChannelIdentifier(this.proxyPlayer).getId())) {
+      } else if (Settings.IMP.MAIN.MOD.ENABLED && channel.equals(this.plugin.getChannelIdentifier(this.proxyPlayer).getId())) {
         if (this.tokenReceived) {
           this.checkBruteforceAttempts();
           this.proxyPlayer.disconnect(Component.empty());
@@ -348,6 +364,87 @@ public class AuthSessionHandler implements LimboSessionHandler {
 
     this.proxyPlayer.hideBossBar(this.bossBar);
     this.plugin.removeAuthenticatingPlayer(this.player.getProxyPlayer().getUsername());
+    this.plugin.getProtectionManager().recordSessionEnd(this.proxyPlayer, this.playerInfo != null, this.attemptsMade, this.joinTime);
+  }
+
+  private void recordFailedLoginAttempt(String password) {
+    this.plugin.getServer().getEventManager().fireAndForget(new FailedLoginAttemptEvent(this.proxyPlayer, this.playerInfo, this.attempts));
+    this.recordAttempt(AttemptOutcome.LOGIN_FAIL, password);
+  }
+
+  private void recordAttempt(AttemptOutcome outcome, @Nullable String password) {
+    ProtectionManager protection = this.plugin.getProtectionManager();
+    if (!protection.isEnabled()) {
+      return;
+    }
+
+    ++this.attemptsMade;
+    long now = System.currentTimeMillis();
+    AttemptObservation.Builder builder = AttemptObservation
+        .builder(this.proxyPlayer.getUsername().toLowerCase(Locale.ROOT), this.proxyPlayer.getRemoteAddress().getAddress(), outcome)
+        .timestamp(now)
+        .millisSinceJoin(now - this.joinTime)
+        .firstAttemptOfSession(this.attemptsMade == 1)
+        .clientBrand(this.clientBrand)
+        .protocolVersion(this.proxyPlayer.getProtocolVersion().getProtocol())
+        .floodgate(this.plugin.isFloodgatePlayer(this.proxyPlayer.getUniqueId()));
+
+    if (outcome != AttemptOutcome.REGISTER && this.playerInfo != null) {
+      builder.accountExists(true).storedLoginIp(this.playerInfo.getLoginIp());
+    }
+
+    if (password != null) {
+      builder.fingerprint(protection.fingerprint(password));
+    }
+
+    protection.recordAttempt(builder.build());
+  }
+
+  @Nullable
+  private static String readBrand(ByteBuf content) {
+    try {
+      ByteBuf data = content.duplicate();
+      int readable = data.readableBytes();
+      if (readable == 0 || readable > 512) {
+        return null;
+      }
+
+      // Modern (1.8+) brands are VarInt-length-prefixed UTF-8; legacy ones are the raw payload.
+      String brand;
+      int length = readVarInt(data);
+      if (length >= 0 && length == data.readableBytes()) {
+        brand = data.toString(data.readerIndex(), length, StandardCharsets.UTF_8);
+      } else {
+        data = content.duplicate();
+        brand = data.toString(data.readerIndex(), data.readableBytes(), StandardCharsets.UTF_8);
+      }
+
+      brand = brand.replaceAll("[\\x00-\\x1F]", "").trim();
+      if (brand.isEmpty()) {
+        return null;
+      }
+
+      return brand.length() > 64 ? brand.substring(0, 64) : brand;
+    } catch (Exception e) {
+      return null;
+    }
+  }
+
+  private static int readVarInt(ByteBuf data) {
+    int result = 0;
+    for (int shift = 0; shift < 32; shift += 7) {
+      if (!data.isReadable()) {
+        return -1;
+      }
+
+      byte part = data.readByte();
+      result |= (part & 0x7F) << shift;
+      if ((part & 0x80) == 0) {
+        return result;
+      }
+    }
+
+    return -1;
   }
 
   private void sendMessage(boolean sendTitle) {
