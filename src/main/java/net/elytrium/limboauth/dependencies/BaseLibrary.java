@@ -22,6 +22,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.net.MalformedURLException;
 import java.net.URL;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
@@ -83,9 +84,20 @@ public enum BaseLibrary {
   public URL getClassLoaderURL() throws MalformedURLException {
     if (!Files.exists(this.filenamePath)) {
       try {
+        Files.createDirectories(this.filenamePath.getParent());
+
+        // Download to a temporary file first, so an interrupted download can't leave
+        // a truncated jar at the final path that would be treated as valid forever.
+        Path tempFile = Files.createTempFile(this.filenamePath.getParent(), this.filenamePath.getFileName().toString(), ".tmp");
         try (InputStream in = this.mavenRepoURL.openStream()) {
-          Files.createDirectories(this.filenamePath.getParent());
-          Files.copy(in, Files.createFile(this.filenamePath), StandardCopyOption.REPLACE_EXISTING);
+          Files.copy(in, tempFile, StandardCopyOption.REPLACE_EXISTING);
+          try {
+            Files.move(tempFile, this.filenamePath, StandardCopyOption.ATOMIC_MOVE);
+          } catch (AtomicMoveNotSupportedException e) {
+            Files.move(tempFile, this.filenamePath, StandardCopyOption.REPLACE_EXISTING);
+          }
+        } finally {
+          Files.deleteIfExists(tempFile);
         }
       } catch (IOException e) {
         throw new IllegalArgumentException(e);

@@ -30,8 +30,8 @@ import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.Driver;
 import java.sql.DriverManager;
-import java.sql.PreparedStatement;
 import java.sql.SQLException;
+import java.sql.Statement;
 import java.util.Locale;
 import java.util.Properties;
 
@@ -44,25 +44,35 @@ public enum DatabaseLibrary {
   H2(
       BaseLibrary.H2_V2,
           (classLoader, dir, jdbc, user, password) -> {
-            Connection modernConnection = fromDriver(classLoader.loadClass("org.h2.Driver"), jdbc, null, null, true);
-
             Path legacyDatabase = dir.resolve("limboauth.mv.db");
-            if (Files.exists(legacyDatabase)) {
-              Path dumpFile = dir.resolve("limboauth.dump.sql");
-              try (Connection legacyConnection = H2_LEGACY_V1.connect(dir, null, null, user, password)) {
-                try (PreparedStatement migrateStatement = legacyConnection.prepareStatement("SCRIPT TO '?'")) {
-                  migrateStatement.setString(1, dumpFile.toString());
-                  migrateStatement.execute();
-                }
-              }
+            if (!Files.exists(legacyDatabase)) {
+              return fromDriver(classLoader.loadClass("org.h2.Driver"), jdbc, null, null, true);
+            }
 
-              try (PreparedStatement migrateStatement = modernConnection.prepareStatement("RUNSCRIPT FROM '?'")) {
-                migrateStatement.setString(1, dumpFile.toString());
-                migrateStatement.execute();
+            Path dumpFile = dir.resolve("limboauth.dump.sql");
+            // SCRIPT/RUNSCRIPT don't support bind parameters, so the file name is inlined as an escaped SQL literal.
+            String dumpFileLiteral = "'" + dumpFile.toString().replace("'", "''") + "'";
+            try (Connection legacyConnection = H2_LEGACY_V1.connect(dir, null, null, user, password);
+                Statement migrateStatement = legacyConnection.createStatement()) {
+              migrateStatement.execute("SCRIPT TO " + dumpFileLiteral);
+            }
+
+            Connection modernConnection = fromDriver(classLoader.loadClass("org.h2.Driver"), jdbc, null, null, true);
+            try {
+              try (Statement migrateStatement = modernConnection.createStatement()) {
+                migrateStatement.execute("RUNSCRIPT FROM " + dumpFileLiteral + " FROM_1X");
               }
 
               Files.delete(dumpFile);
               Files.move(legacyDatabase, dir.resolve("limboauth-v1-backup.mv.db"));
+            } catch (Throwable t) {
+              try {
+                modernConnection.close();
+              } catch (SQLException suppressed) {
+                t.addSuppressed(suppressed);
+              }
+
+              throw t;
             }
 
             return modernConnection;
@@ -140,6 +150,11 @@ public enum DatabaseLibrary {
 
       this.driver.setOriginal((Driver) driverClass.getConstructor().newInstance());
       DriverManager.registerDriver(this.driver);
+
+      // Run the connector once so its one-time work (e.g. the H2 v1 -> v2 migration) is executed.
+      // connectToORM used to do this before it was switched to IsolatedDriver, and without it the
+      // migration code is never reached.
+      this.connect(classLoader, dir, this.stringGetter.getJdbcString(dir, hostname, database), user, password).close();
     }
 
     String jdbc = this.stringGetter.getJdbcString(dir, hostname, database);

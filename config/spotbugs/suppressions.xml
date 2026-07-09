@@ -20,4 +20,9 @@
     <Match>
         <Bug pattern="THROWS_METHOD_THROWS_CLAUSE_THROWABLE"/>
     </Match>
+    <!-- H2 SCRIPT TO / RUNSCRIPT FROM don't support bind parameters; the file path is escaped and comes from the plugin data directory, not from user input. -->
+    <Match>
+        <Class name="net.elytrium.limboauth.dependencies.DatabaseLibrary"/>
+        <Bug pattern="SQL_NONCONSTANT_STRING_PASSED_TO_EXECUTE"/>
+    </Match>
 </FindBugsFilter>

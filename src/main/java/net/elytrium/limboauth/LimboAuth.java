@@ -76,6 +76,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.regex.Pattern;
@@ -315,6 +316,11 @@ public class LimboAuth {
     Settings.DATABASE dbConfig = Settings.IMP.DATABASE;
     DatabaseLibrary databaseLibrary = dbConfig.STORAGE_TYPE;
     try {
+      // Close the previous pool on reload, otherwise its connections (and H2/SQLite file locks) leak.
+      if (this.connectionSource != null) {
+        this.connectionSource.closeQuietly();
+      }
+
       this.connectionSource = databaseLibrary.connectToORM(
           this.dataDirectoryFile.toPath().toAbsolutePath(),
           dbConfig.HOSTNAME,
@@ -909,13 +915,7 @@ public class LimboAuth {
   }
 
   private CachedBruteforceUser getBruteforceUser(InetAddress address) {
-    CachedBruteforceUser user = this.bruteforceCache.get(address);
-    if (user == null) {
-      user = new CachedBruteforceUser(System.currentTimeMillis());
-      this.bruteforceCache.put(address, user);
-    }
-
-    return user;
+    return this.bruteforceCache.computeIfAbsent(address, addr -> new CachedBruteforceUser(System.currentTimeMillis()));
   }
 
   public void clearBruteforceAttempts(InetAddress address) {
@@ -1054,18 +1054,18 @@ public class LimboAuth {
 
   private static class CachedBruteforceUser extends CachedUser {
 
-    private int attempts;
+    private final AtomicInteger attempts = new AtomicInteger();
 
     public CachedBruteforceUser(long checkTime) {
       super(checkTime);
     }
 
     public void incrementAttempts() {
-      this.attempts++;
+      this.attempts.incrementAndGet();
     }
 
     public int getAttempts() {
-      return  this.attempts;
+      return this.attempts.get();
     }
   }
 

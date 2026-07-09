@@ -71,7 +71,7 @@ public class BackendEndpointsListener {
 
   @Subscribe
   public void onRequest(PluginMessageEvent event) {
-    if (event.getIdentifier() != API_CHANNEL) {
+    if (!API_CHANNEL.equals(event.getIdentifier())) {
       return;
     }
 

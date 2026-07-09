@@ -24,13 +24,15 @@ compileJava {
 repositories {
     mavenCentral()
 
-    maven {
-        setName("elytrium-repo")
-        setUrl("https://maven.elytrium.net/repo/")
-    }
+    // PaperMC must be declared before the Elytrium repo: both serve velocity-api snapshots,
+    // but the Elytrium mirror lags behind and would otherwise shadow the up-to-date builds.
     maven {
         setName("papermc-repo")
         setUrl("https://repo.papermc.io/repository/maven-public/")
+    }
+    maven {
+        setName("elytrium-repo")
+        setUrl("https://maven.elytrium.net/repo/")
     }
     maven {
         setName("opencollab-snapshot")
