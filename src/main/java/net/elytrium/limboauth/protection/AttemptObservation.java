@@ -43,6 +43,7 @@ public class AttemptObservation {
   private final long passwordFingerprint;
   @Nullable
   private final String storedLoginIp;
+  private final long storedLoginDate;
   private final boolean floodgate;
 
   private AttemptObservation(Builder builder) {
@@ -61,6 +62,7 @@ public class AttemptObservation {
     this.hasFingerprint = builder.hasFingerprint;
     this.passwordFingerprint = builder.passwordFingerprint;
     this.storedLoginIp = builder.storedLoginIp;
+    this.storedLoginDate = builder.storedLoginDate;
     this.floodgate = builder.floodgate;
   }
 
@@ -126,6 +128,14 @@ public class AttemptObservation {
     return this.storedLoginIp;
   }
 
+  /**
+   * Timestamp of the account's last successful login before this attempt, or {@code 0}
+   * when unknown (unregistered account or a legacy row without a login date).
+   */
+  public long getStoredLoginDate() {
+    return this.storedLoginDate;
+  }
+
   public boolean isFloodgate() {
     return this.floodgate;
   }
@@ -152,6 +162,7 @@ public class AttemptObservation {
     private long passwordFingerprint;
     @Nullable
     private String storedLoginIp;
+    private long storedLoginDate;
     private boolean floodgate;
 
     private Builder(String lowercaseNickname, InetAddress ip, AttemptOutcome outcome) {
@@ -203,6 +214,13 @@ public class AttemptObservation {
 
     public Builder storedLoginIp(@Nullable String storedLoginIp) {
       this.storedLoginIp = storedLoginIp;
+      return this;
+    }
+
+    public Builder storedLoginDate(long storedLoginDate) {
+      // RegisteredPlayer#getLoginDate() reports Long.MIN_VALUE for legacy rows; collapse
+      // every "unknown" flavor to 0 so consumers only need one absence check.
+      this.storedLoginDate = Math.max(0, storedLoginDate);
       return this;
     }
 

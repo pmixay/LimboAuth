@@ -36,6 +36,8 @@ import net.elytrium.limboauth.LimboAuth;
 import net.elytrium.limboauth.Settings;
 import net.elytrium.limboauth.model.SQLRuntimeException;
 import net.elytrium.limboauth.protection.action.ActionPolicy;
+import net.elytrium.limboauth.protection.action.EnforceActionPolicy;
+import net.elytrium.limboauth.protection.action.EnforcementState;
 import net.elytrium.limboauth.protection.action.MonitorActionPolicy;
 import net.elytrium.limboauth.protection.aggregate.AggregateSnapshot;
 import net.elytrium.limboauth.protection.aggregate.ProtectionAggregator;
@@ -58,8 +60,12 @@ import org.slf4j.Logger;
  * parts to the current connection source and reschedules the maintenance tasks.
  *
  * <p>Pipeline (on a dedicated single thread, never the connection threads):
- * social exemption -&gt; window aggregation -&gt; multi-factor scoring -&gt; monitor-only
- * dispatch (log, PROTECTION_EVENTS, Velocity event, Discord webhook).
+ * social exemption -&gt; window aggregation -&gt; multi-factor scoring -&gt; dispatch
+ * (log, PROTECTION_EVENTS, Velocity event, Discord webhook) plus, in ENFORCE mode,
+ * the enforcement actions (kick, source block, account shield).
+ *
+ * <p>The connection threads additionally consult two synchronous, lock-free gates:
+ * {@link #shouldBlockJoin} at session start and {@link #isLoginShielded} on login.
  */
 public class ProtectionManager {
 
@@ -74,7 +80,9 @@ public class ProtectionManager {
   private final PasswordFingerprinter fingerprinter = new PasswordFingerprinter();
   private final ProtectionAggregator aggregator = new ProtectionAggregator();
   private final RiskScorer scorer = new RiskScorer();
-  private final ActionPolicy actionPolicy = new MonitorActionPolicy();
+  private final EnforcementState enforcementState = new EnforcementState(System::currentTimeMillis);
+  private final ActionPolicy monitorPolicy = new MonitorActionPolicy();
+  private final ActionPolicy enforcePolicy;
   private final ProtectionEventStorage storage;
   private final SocialLinkResolver socialResolver;
   private final GeoIpProvider geoIpProvider;
@@ -85,6 +93,8 @@ public class ProtectionManager {
   private final Map<String, RecentAssessment> recentAssessments;
 
   private volatile boolean enabled;
+  private volatile boolean enforcementActive;
+  private volatile Component protectionKick = Component.empty();
   private ScheduledTask purgeTask;
   private ScheduledTask retentionTask;
   private ScheduledTask webhookTask;
@@ -104,6 +114,7 @@ public class ProtectionManager {
       thread.setDaemon(true);
       return thread;
     }, (runnable, executor) -> this.droppedObservations.incrementAndGet());
+    this.enforcePolicy = new EnforceActionPolicy(this.enforcementState, this::kickSession, logger);
     this.executor.allowCoreThreadTimeOut(true);
     this.recentAssessments = new LinkedHashMap<>(64, 0.75F, true) {
       @Override
@@ -115,6 +126,10 @@ public class ProtectionManager {
 
   public void reload() {
     this.enabled = Settings.IMP.PROTECTION.ENABLED;
+    String mode = Settings.IMP.PROTECTION.MODE;
+    this.enforcementActive = this.enabled
+        && (Settings.IMP.PROTECTION.ENFORCEMENT.ENABLED || "ENFORCE".equalsIgnoreCase(mode));
+    this.protectionKick = LimboAuth.getSerializer().deserialize(Settings.IMP.MAIN.STRINGS.PROTECTION_KICK);
 
     if (this.enabled) {
       try {
@@ -125,15 +140,17 @@ public class ProtectionManager {
 
       this.socialResolver.reload(this.plugin.getPlayerDao());
       this.geoIpProvider.reload(this.getGeoIpDirectory());
-      this.logger.info("Account protection is active in MONITOR mode: it detects and reports, but never kicks or locks anyone.");
-      if (!"MONITOR".equalsIgnoreCase(Settings.IMP.PROTECTION.MODE)) {
-        this.logger.warn("protection.mode \"{}\" is not implemented yet, running in MONITOR mode.", Settings.IMP.PROTECTION.MODE);
-      }
-
-      if (Settings.IMP.PROTECTION.ENFORCEMENT.ENABLED
-          || !"NONE".equalsIgnoreCase(Settings.IMP.PROTECTION.ENFORCEMENT.ACTION_HIGH)
-          || !"NONE".equalsIgnoreCase(Settings.IMP.PROTECTION.ENFORCEMENT.ACTION_CRITICAL)) {
-        this.logger.warn("protection.enforcement is reserved for a future release and is ignored in this version.");
+      if (this.enforcementActive) {
+        Settings.PROTECTION.ENFORCEMENT enforcement = Settings.IMP.PROTECTION.ENFORCEMENT;
+        this.logger.info("Account protection is active in ENFORCE mode: kick >= {}, source block >= {} ({} min), "
+                + "account shield on successful logins >= {} ({} min).",
+            enforcement.KICK_ON, enforcement.BLOCK_SOURCE_ON, enforcement.SOURCE_BLOCK_MINUTES,
+            enforcement.SHIELD_ACCOUNT_ON, enforcement.SHIELD_MINUTES);
+      } else {
+        this.logger.info("Account protection is active in MONITOR mode: it detects and reports, but never kicks or locks anyone.");
+        if (!"MONITOR".equalsIgnoreCase(mode)) {
+          this.logger.warn("Unknown protection.mode \"{}\" - use MONITOR or ENFORCE. Running in MONITOR mode.", mode);
+        }
       }
 
       if (Settings.IMP.MAIN.MOD.ENABLED && Settings.IMP.MAIN.MOD.LOGIN_ONLY_BY_MOD) {
@@ -227,7 +244,7 @@ public class ProtectionManager {
         }
       }
 
-      this.actionPolicy.apply(observation, assessment);
+      (this.enforcementActive ? this.enforcePolicy : this.monitorPolicy).apply(observation, assessment);
       this.alertDispatcher.dispatch(observation, assessment, geo);
     } catch (Throwable t) {
       this.logger.warn("Protection pipeline failure (attempt ignored)", t);
@@ -239,6 +256,54 @@ public class ProtectionManager {
     this.aggregator.purge(now);
     this.socialResolver.purgeCache(now);
     this.alertDispatcher.purge(now);
+    this.enforcementState.purge(now);
+  }
+
+  /**
+   * Synchronous connection-thread gate: should this join be refused outright because the
+   * source IP is under an enforcement block? The map read is free; the social lookup (a
+   * TTL-cached query, matching the blocking DAO calls the join path already makes) only
+   * runs for registered accounts on an actually-blocked IP, so linked-social players
+   * behind a blocked shared IP keep their promised exemption from enforcement.
+   */
+  public boolean shouldBlockJoin(Player proxyPlayer, boolean accountExists) {
+    if (!this.enabled || !this.enforcementActive
+        || !this.enforcementState.isSourceBlocked(proxyPlayer.getRemoteAddress().getAddress().getHostAddress())) {
+      return false;
+    }
+
+    if (proxyPlayer.hasPermission("limboauth.protection.bypass")) {
+      return false;
+    }
+
+    return !(accountExists && this.socialResolver.isLinked(proxyPlayer.getUsername().toLowerCase(Locale.ROOT)));
+  }
+
+  /**
+   * Synchronous connection-thread gate: is this account currently shielded? While shielded,
+   * the login flow treats every password as wrong, so a checker can never confirm a hit.
+   * No social-exemption check is needed (or wanted - it would block the login thread on a
+   * database query): linked players are exempt from the pipeline upstream, so a shield can
+   * only ever have been placed on an unlinked account.
+   */
+  public boolean isLoginShielded(String lowercaseNickname) {
+    return this.enabled && this.enforcementActive && this.enforcementState.isAccountShielded(lowercaseNickname);
+  }
+
+  public Component getProtectionKick() {
+    return this.protectionKick;
+  }
+
+  private void kickSession(String lowercaseNickname, String expectedIp) {
+    this.plugin.getServer().getPlayer(lowercaseNickname).ifPresent(player -> {
+      // The attacker may have disconnected and the real owner reconnected in the meantime;
+      // only kick the session that actually produced the flagged attempt.
+      if (expectedIp.equals(player.getRemoteAddress().getAddress().getHostAddress())
+          && !player.hasPermission("limboauth.protection.bypass")) {
+        this.logger.warn("enforcement action=kick player={} ip={}", lowercaseNickname, expectedIp);
+        player.disconnect(this.protectionKick);
+      }
+    });
   }
 
   private Path getGeoIpDirectory() {
@@ -324,18 +389,47 @@ public class ProtectionManager {
         this.testWebhook(source);
         break;
       }
+      case "blocks": {
+        this.sendBlocks(source);
+        break;
+      }
+      case "unblock": {
+        if (args.length < 3) {
+          source.sendMessage(Component.text("Usage: /limboauth protection unblock <ip|nickname>", NamedTextColor.YELLOW));
+        } else {
+          String removed = this.enforcementState.unblock(args[2]);
+          if (removed == null) {
+            source.sendMessage(Component.text("No active block or shield matches \"" + args[2] + "\".", NamedTextColor.RED));
+          } else {
+            this.logger.info("enforcement action=unblock target={} by={}", args[2], source);
+            source.sendMessage(Component.text("Removed: " + removed, NamedTextColor.GREEN));
+          }
+        }
+
+        break;
+      }
       default: {
-        source.sendMessage(Component.text("Usage: /limboauth protection <status|stats|recent [n]|test-webhook>", NamedTextColor.YELLOW));
+        source.sendMessage(Component.text("Usage: /limboauth protection <status|stats|recent [n]|blocks|unblock <target>|test-webhook>",
+            NamedTextColor.YELLOW));
         break;
       }
     }
   }
 
   private void sendStatus(CommandSource source) {
-    source.sendMessage(Component.text("Account protection: " + (this.enabled ? "ENABLED (monitor mode)" : "DISABLED"),
-        this.enabled ? NamedTextColor.GREEN : NamedTextColor.RED));
+    String state = !this.enabled ? "DISABLED" : this.enforcementActive ? "ENABLED (ENFORCE mode)" : "ENABLED (monitor mode)";
+    source.sendMessage(Component.text("Account protection: " + state, this.enabled ? NamedTextColor.GREEN : NamedTextColor.RED));
     if (!this.enabled) {
       return;
+    }
+
+    if (this.enforcementActive) {
+      Settings.PROTECTION.ENFORCEMENT enforcement = Settings.IMP.PROTECTION.ENFORCEMENT;
+      source.sendMessage(Component.text("Enforcement: kick >= " + enforcement.KICK_ON
+          + ", block source >= " + enforcement.BLOCK_SOURCE_ON + " (" + enforcement.SOURCE_BLOCK_MINUTES + "m)"
+          + ", shield account >= " + enforcement.SHIELD_ACCOUNT_ON + " (" + enforcement.SHIELD_MINUTES + "m); "
+          + this.enforcementState.getBlockedSourceCount() + " blocked sources, "
+          + this.enforcementState.getShieldedAccountCount() + " shielded accounts", NamedTextColor.WHITE));
     }
 
     source.sendMessage(Component.text("Queue: " + this.executor.getQueue().size() + " pending, "
@@ -413,6 +507,32 @@ public class ProtectionManager {
     } catch (Exception e) {
       source.sendMessage(Component.text("Failed to query stored events: " + e.getMessage(), NamedTextColor.RED));
     }
+  }
+
+  private void sendBlocks(CommandSource source) {
+    if (!this.enforcementActive) {
+      source.sendMessage(Component.text("Enforcement is not active (monitor mode) - there are no blocks or shields.", NamedTextColor.YELLOW));
+      return;
+    }
+
+    long now = System.currentTimeMillis();
+    Map<String, Long> sources = this.enforcementState.snapshotBlockedSources();
+    Map<String, Long> shields = this.enforcementState.snapshotShieldedAccounts();
+
+    source.sendMessage(Component.text("Blocked sources (" + sources.size() + "):", NamedTextColor.WHITE));
+    sources.forEach((ip, until) -> source.sendMessage(
+        Component.text("  " + ip + " - " + this.formatRemaining(until, now) + " left", NamedTextColor.YELLOW)));
+    source.sendMessage(Component.text("Shielded accounts (" + shields.size() + "):", NamedTextColor.WHITE));
+    shields.forEach((nickname, until) -> source.sendMessage(
+        Component.text("  " + nickname + " - " + this.formatRemaining(until, now) + " left", NamedTextColor.YELLOW)));
+    if (!sources.isEmpty() || !shields.isEmpty()) {
+      source.sendMessage(Component.text("Remove one early with /limboauth protection unblock <ip|nickname>", NamedTextColor.GRAY));
+    }
+  }
+
+  private String formatRemaining(long until, long now) {
+    long seconds = Math.max(0, (until - now) / 1000);
+    return seconds < 60 ? seconds + "s" : (seconds / 60) + "m";
   }
 
   private void testWebhook(CommandSource source) {

@@ -46,13 +46,20 @@ public class ProtectionAggregator {
         && observation.getSessionAttempts() >= 1
         && observation.getSessionAttempts() <= windows.CHURN_MAX_ATTEMPTS;
 
+    String storedLoginIp = observation.getStoredLoginIp();
+    boolean newSource = observation.getOutcome() == AttemptOutcome.LOGIN_SUCCESS
+        && storedLoginIp != null
+        && !storedLoginIp.isEmpty()
+        && !storedLoginIp.equals(observation.getIpString());
+
     ActivityWindow.AttemptEvent event = new ActivityWindow.AttemptEvent(
         observation.getTimestamp(),
         observation.getLowercaseNickname(),
         observation.isAccountExists(),
         observation.getIpString(),
         observation.getOutcome(),
-        churn
+        churn,
+        newSource
     );
 
     this.windowFor(this.ipWindows, observation.getIpString(), windows.MAX_TRACKED_IPS).add(event, maxEvents);
@@ -79,13 +86,17 @@ public class ProtectionAggregator {
     ActivityWindow accountWindow = observation.isAccountExists() ? this.accountWindows.get(observation.getLowercaseNickname()) : null;
     ActivityWindow fingerprintWindow = observation.hasFingerprint() ? this.fingerprintWindows.get(observation.getPasswordFingerprint()) : null;
 
+    // Only the raw fail rate is a "fast source" signal bound to the short volume window.
+    // Everything target- or session-shaped is measured over the distribution window: a human
+    // working through leaked credentials spreads a handful of attempts across an hour.
     return new AggregateSnapshot(
         ipWindow == null ? 0 : ipWindow.countFails(volumeSince),
-        ipWindow == null ? 0 : ipWindow.distinctFailedExistingTargets(volumeSince),
-        ipWindow == null ? 0 : ipWindow.countChurnSessions(volumeSince),
-        subnetWindow == null ? 0 : subnetWindow.distinctFailedExistingTargets(volumeSince),
-        subnetWindow == null ? 0 : subnetWindow.distinctIps(volumeSince),
-        subnetWindow == null ? 0 : subnetWindow.countChurnSessions(volumeSince),
+        ipWindow == null ? 0 : ipWindow.distinctFailedExistingTargets(distributionSince),
+        ipWindow == null ? 0 : ipWindow.countChurnSessions(distributionSince),
+        ipWindow == null ? 0 : ipWindow.distinctNewSourceSuccesses(distributionSince),
+        subnetWindow == null ? 0 : subnetWindow.distinctFailedExistingTargets(distributionSince),
+        subnetWindow == null ? 0 : subnetWindow.distinctIps(distributionSince),
+        subnetWindow == null ? 0 : subnetWindow.countChurnSessions(distributionSince),
         accountWindow == null ? 0 : accountWindow.distinctFailIps(distributionSince),
         accountWindow == null ? 0 : accountWindow.countFailsFromOtherIps(distributionSince, observation.getIpString()),
         fingerprintWindow == null ? 0 : fingerprintWindow.distinctFingerprintTargets(distributionSince),

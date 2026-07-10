@@ -20,6 +20,8 @@ package net.elytrium.limboauth.protection.aggregate;
 import java.util.ArrayDeque;
 import java.util.HashSet;
 import java.util.Set;
+import java.util.function.Function;
+import java.util.function.Predicate;
 import net.elytrium.limboauth.protection.AttemptOutcome;
 
 /**
@@ -71,36 +73,16 @@ public class ActivityWindow {
    * usernames (typos, name scans) are deliberately excluded from this heavier signal.
    */
   public int distinctFailedExistingTargets(long since) {
-    Set<String> targets = new HashSet<>();
-    for (AttemptEvent event : this.events) {
-      if (event.time() >= since && event.outcome() == AttemptOutcome.LOGIN_FAIL && event.accountExists()) {
-        targets.add(event.nickname());
-      }
-    }
-
-    return targets.size();
+    return this.distinctCount(since,
+        event -> event.outcome() == AttemptOutcome.LOGIN_FAIL && event.accountExists(), AttemptEvent::nickname);
   }
 
   public int distinctIps(long since) {
-    Set<String> ips = new HashSet<>();
-    for (AttemptEvent event : this.events) {
-      if (event.time() >= since) {
-        ips.add(event.ip());
-      }
-    }
-
-    return ips.size();
+    return this.distinctCount(since, event -> true, AttemptEvent::ip);
   }
 
   public int distinctFailIps(long since) {
-    Set<String> ips = new HashSet<>();
-    for (AttemptEvent event : this.events) {
-      if (event.time() >= since && event.outcome() == AttemptOutcome.LOGIN_FAIL) {
-        ips.add(event.ip());
-      }
-    }
-
-    return ips.size();
+    return this.distinctCount(since, event -> event.outcome() == AttemptOutcome.LOGIN_FAIL, AttemptEvent::ip);
   }
 
   public int countFailsFromOtherIps(long since, String currentIp) {
@@ -118,15 +100,8 @@ public class ActivityWindow {
    * Distinct existing accounts this password fingerprint was tried against.
    */
   public int distinctFingerprintTargets(long since) {
-    Set<String> targets = new HashSet<>();
-    for (AttemptEvent event : this.events) {
-      if (event.time() >= since && event.accountExists()
-          && (event.outcome() == AttemptOutcome.LOGIN_FAIL || event.outcome() == AttemptOutcome.LOGIN_SUCCESS)) {
-        targets.add(event.nickname());
-      }
-    }
-
-    return targets.size();
+    return this.distinctCount(since, event -> event.accountExists()
+        && (event.outcome() == AttemptOutcome.LOGIN_FAIL || event.outcome() == AttemptOutcome.LOGIN_SUCCESS), AttemptEvent::nickname);
   }
 
   public int countChurnSessions(long since) {
@@ -140,6 +115,27 @@ public class ActivityWindow {
     return count;
   }
 
-  public record AttemptEvent(long time, String nickname, boolean accountExists, String ip, AttemptOutcome outcome, boolean churn) {
+  /**
+   * Distinct accounts successfully logged into from this source while the account's stored
+   * LOGINIP pointed elsewhere. Alts relogged by their owner keep their stored IP and are
+   * excluded, so this only counts takeover-shaped successes.
+   */
+  public int distinctNewSourceSuccesses(long since) {
+    return this.distinctCount(since, AttemptEvent::newSource, AttemptEvent::nickname);
+  }
+
+  private int distinctCount(long since, Predicate<AttemptEvent> filter, Function<AttemptEvent, String> key) {
+    Set<String> values = new HashSet<>();
+    for (AttemptEvent event : this.events) {
+      if (event.time() >= since && filter.test(event)) {
+        values.add(key.apply(event));
+      }
+    }
+
+    return values.size();
+  }
+
+  public record AttemptEvent(long time, String nickname, boolean accountExists, String ip, AttemptOutcome outcome, boolean churn,
+                             boolean newSource) {
   }
 }

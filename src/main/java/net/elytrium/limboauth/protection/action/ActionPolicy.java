@@ -21,9 +21,9 @@ import net.elytrium.limboauth.protection.AttemptObservation;
 import net.elytrium.limboauth.protection.scoring.RiskAssessment;
 
 /**
- * Reaction to a scored attempt. The only implementation shipped in this version is
- * {@link MonitorActionPolicy}; an enforcing policy can be added later without
- * touching the detection pipeline.
+ * Reaction to a scored attempt: {@link MonitorActionPolicy} (observe only) or
+ * {@link EnforceActionPolicy} (kick / block source / shield account), selected
+ * per attempt from the configured protection mode.
  */
 public interface ActionPolicy {
 

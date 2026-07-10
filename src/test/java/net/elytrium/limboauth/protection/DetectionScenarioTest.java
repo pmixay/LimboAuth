@@ -22,7 +22,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.net.InetAddress;
 import net.elytrium.limboauth.protection.aggregate.ProtectionAggregator;
+import net.elytrium.limboauth.protection.geoip.GeoIpResult;
 import net.elytrium.limboauth.protection.scoring.RiskAssessment;
+import net.elytrium.limboauth.protection.scoring.RiskFactor;
 import net.elytrium.limboauth.protection.scoring.RiskScorer;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -194,6 +196,148 @@ class DetectionScenarioTest {
   }
 
   /**
+   * FPR anchor for the widened 60-minute counting: three players behind one shared IP,
+   * each mistyping twice, spread across nearly an hour. All six failures now land in the
+   * same distribution window, and the total must still stay below SUSPICIOUS.
+   */
+  @Test
+  void sharedIpMistypesSpreadOverAnHourStayBelowSuspicious() throws Exception {
+    ProtectionAggregator aggregator = new ProtectionAggregator();
+    RiskScorer scorer = new RiskScorer();
+    long now = 1_700_000_000_000L;
+
+    Severity worst = Severity.NONE;
+    for (int player = 0; player < 3; ++player) {
+      for (int attempt = 0; attempt < 2; ++attempt) {
+        AttemptObservation fail = AttemptObservation
+            .builder("classmate" + player, InetAddress.getByName("192.0.2.50"), AttemptOutcome.LOGIN_FAIL)
+            .accountExists(true)
+            .timestamp(now + (player * 2L + attempt) * 11L * 60000)
+            .millisSinceJoin(5000)
+            .clientBrand("fabric")
+            .fingerprint(5000L + player * 10L + attempt)
+            .build();
+        aggregator.update(fail);
+        RiskAssessment assessment = scorer.score(fail, aggregator.snapshot(fail), null, null);
+        if (assessment.severity().atLeast(worst)) {
+          worst = assessment.severity();
+        }
+      }
+    }
+
+    assertFalse(worst.atLeast(Severity.SUSPICIOUS), "hour-spread shared-IP mistypes must stay below SUSPICIOUS, got " + worst);
+  }
+
+  /**
+   * The v1.1 threat model: a person looks up leaked passwords on a website and manually
+   * checks four existing accounts from one IP over 40 minutes, with a normal client,
+   * disconnecting between accounts. Far too slow for the volume window, but the
+   * distribution-window signals must still add up to SUSPICIOUS.
+   */
+  @Test
+  void humanPacedLeakedAccountCheckingReachesSuspicious() throws Exception {
+    ProtectionAggregator aggregator = new ProtectionAggregator();
+    RiskScorer scorer = new RiskScorer();
+    long now = 1_700_000_000_000L;
+
+    Severity worst = Severity.NONE;
+    for (int i = 0; i < 4; ++i) {
+      long joinTime = now + i * 13L * 60000;
+      AttemptObservation fail = AttemptObservation
+          .builder("leaked" + i, InetAddress.getByName("203.0.113.99"), AttemptOutcome.LOGIN_FAIL)
+          .accountExists(true)
+          .timestamp(joinTime)
+          .millisSinceJoin(7000)
+          .firstAttemptOfSession(true)
+          .clientBrand("vanilla")
+          .fingerprint(6000L + i)
+          .build();
+      aggregator.update(fail);
+      RiskAssessment assessment = scorer.score(fail, aggregator.snapshot(fail), null, null);
+      if (assessment.severity().atLeast(worst)) {
+        worst = assessment.severity();
+      }
+
+      // Quits a few seconds later to rejoin under the next leaked username.
+      aggregator.update(AttemptObservation
+          .builder("leaked" + i, InetAddress.getByName("203.0.113.99"), AttemptOutcome.SESSION_END)
+          .accountExists(true)
+          .timestamp(joinTime + 9000)
+          .millisSinceJoin(16000)
+          .sessionAttempts(1)
+          .build());
+    }
+
+    assertTrue(worst.atLeast(Severity.SUSPICIOUS), "human-paced account checking should reach SUSPICIOUS, got " + worst);
+    assertFalse(worst.atLeast(Severity.HIGH), "failures alone (no confirmed hit) must stay below HIGH, got " + worst);
+  }
+
+  /**
+   * FPR guard for the new-source factor: a player whose ISP handed them a new address
+   * relogs two of their own alts. Both stored login IPs differ from the current one, so
+   * the factor fires - but on its own it must stay an INFO-level breadcrumb.
+   */
+  @Test
+  void ownAltsAfterIspAddressChangeStayBelowSuspicious() throws Exception {
+    ProtectionAggregator aggregator = new ProtectionAggregator();
+    RiskScorer scorer = new RiskScorer();
+    long now = 1_700_000_000_000L;
+    String oldIspIp = "198.51.100.44";
+
+    AttemptObservation first = this.altLogin(aggregator, "alt1", now, oldIspIp, now - 2L * 86400000);
+    RiskAssessment firstAssessment = scorer.score(first, aggregator.snapshot(first), null, null);
+    assertFalse(firstAssessment.hasFactor(RiskFactor.MULTI_ACCOUNT_NEW_SOURCE_SUCCESS));
+
+    // Plays for five minutes (no churn), then switches to the second alt.
+    aggregator.update(AttemptObservation
+        .builder("alt1", InetAddress.getByName("203.0.113.7"), AttemptOutcome.SESSION_END)
+        .accountExists(true)
+        .timestamp(now + 300000)
+        .millisSinceJoin(300000)
+        .sessionAttempts(1)
+        .build());
+
+    AttemptObservation second = this.altLogin(aggregator, "alt2", now + 320000, oldIspIp, now - 3L * 86400000);
+    RiskAssessment secondAssessment = scorer.score(second, aggregator.snapshot(second), null, null);
+
+    assertTrue(secondAssessment.hasFactor(RiskFactor.MULTI_ACCOUNT_NEW_SOURCE_SUCCESS));
+    assertFalse(secondAssessment.severity().atLeast(Severity.SUSPICIOUS),
+        "own alts after an IP change must stay below SUSPICIOUS, got " + secondAssessment.severity());
+  }
+
+  /**
+   * First-try takeover of a dormant account, the pattern password-website attackers
+   * produce: no failed attempts anywhere, just one clean success on an account whose
+   * last login is 45 days old, from another subnet and (GeoIP active) another country.
+   */
+  @Test
+  void firstTryDormantTakeoverWithGeoMismatchIsSuspicious() throws Exception {
+    ProtectionAggregator aggregator = new ProtectionAggregator();
+    RiskScorer scorer = new RiskScorer();
+    long now = 1_700_000_000_000L;
+
+    AttemptObservation hit = AttemptObservation
+        .builder("veteran", InetAddress.getByName("203.0.113.7"), AttemptOutcome.LOGIN_SUCCESS)
+        .accountExists(true)
+        .timestamp(now)
+        .millisSinceJoin(6000)
+        .firstAttemptOfSession(true)
+        .clientBrand("vanilla")
+        .storedLoginIp("198.51.100.44")
+        .storedLoginDate(now - 45L * 86400000)
+        .fingerprint(777L)
+        .build();
+    aggregator.update(hit);
+    RiskAssessment assessment = scorer.score(hit, aggregator.snapshot(hit), new GeoIpResult("DE", null, null), "FR");
+
+    assertTrue(assessment.hasFactor(RiskFactor.DORMANT_ACCOUNT_TAKEOVER));
+    assertTrue(assessment.severity().atLeast(Severity.SUSPICIOUS),
+        "a first-try dormant takeover with a geo mismatch must be SUSPICIOUS, got " + assessment.severity());
+    assertFalse(assessment.severity().atLeast(Severity.HIGH),
+        "without volume or confirmation signals it must stay below HIGH, got " + assessment.severity());
+  }
+
+  /**
    * Password spraying: the same password tried against many accounts, low-and-slow,
    * and the moment it works it must be CRITICAL.
    */
@@ -230,5 +374,22 @@ class DetectionScenarioTest {
 
     assertTrue(assessment.severity().atLeast(Severity.CRITICAL),
         "a sprayed password that works must be CRITICAL, got " + assessment.severity());
+  }
+
+  private AttemptObservation altLogin(ProtectionAggregator aggregator, String nickname, long time,
+                                      String storedLoginIp, long storedLoginDate) throws Exception {
+    AttemptObservation observation = AttemptObservation
+        .builder(nickname, InetAddress.getByName("203.0.113.7"), AttemptOutcome.LOGIN_SUCCESS)
+        .accountExists(true)
+        .timestamp(time)
+        .millisSinceJoin(6000)
+        .firstAttemptOfSession(true)
+        .clientBrand("vanilla")
+        .storedLoginIp(storedLoginIp)
+        .storedLoginDate(storedLoginDate)
+        .fingerprint(nickname.hashCode())
+        .build();
+    aggregator.update(observation);
+    return observation;
   }
 }

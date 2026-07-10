@@ -17,11 +17,27 @@
 
 package net.elytrium.limboauth.protection;
 
+import com.google.common.net.InetAddresses;
 import java.net.InetAddress;
+import org.checkerframework.checker.nullness.qual.Nullable;
 
 public final class SubnetKey {
 
   private SubnetKey() {
+  }
+
+  /**
+   * Subnet key of a stored IP string, or {@code null} when the value is absent or not a
+   * plain IP literal. Uses Guava's literal-only parser so a corrupted LOGINIP value can
+   * never trigger a DNS lookup from the scoring path.
+   */
+  @Nullable
+  public static String ofLiteral(@Nullable String address) {
+    if (address == null || address.isEmpty() || !InetAddresses.isInetAddress(address)) {
+      return null;
+    }
+
+    return of(InetAddresses.forString(address));
   }
 
   /**

@@ -18,6 +18,7 @@
 package net.elytrium.limboauth;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -50,8 +51,81 @@ class SettingsUpgradeTest {
     assertEquals("SOCIAL", Settings.IMP.PROTECTION.SOCIAL.TABLE_NAME);
     assertEquals(50, Settings.IMP.PROTECTION.SCORING.THRESHOLD_HIGH);
 
+    // v1.1 human-attacker tuning keys must appear on upgrade as well.
+    assertEquals(30, Settings.IMP.PROTECTION.SCORING.DORMANT_DAYS);
+    assertEquals(15, Settings.IMP.PROTECTION.SCORING.WEIGHTS.IP_DISTINCT_TARGETS_4);
+    assertEquals(15, Settings.IMP.PROTECTION.SCORING.WEIGHTS.MULTI_ACCOUNT_NEW_SOURCE_2);
+    assertEquals(15, Settings.IMP.PROTECTION.SCORING.WEIGHTS.DORMANT_ACCOUNT_TAKEOVER);
+
+    // v2 enforcement ships present-but-off: one switch away, safe thresholds preconfigured.
+    assertFalse(Settings.IMP.PROTECTION.ENFORCEMENT.ENABLED);
+    assertEquals("HIGH", Settings.IMP.PROTECTION.ENFORCEMENT.KICK_ON);
+    assertEquals("HIGH", Settings.IMP.PROTECTION.ENFORCEMENT.BLOCK_SOURCE_ON);
+    assertEquals("HIGH", Settings.IMP.PROTECTION.ENFORCEMENT.SHIELD_ACCOUNT_ON);
+    assertEquals(30, Settings.IMP.PROTECTION.ENFORCEMENT.SOURCE_BLOCK_MINUTES);
+    assertEquals(60, Settings.IMP.PROTECTION.ENFORCEMENT.SHIELD_MINUTES);
+
     String written = Files.readString(configFile, StandardCharsets.UTF_8);
     assertTrue(written.contains("protection:"), "the protection section must be written back to disk");
     assertTrue(written.contains("geo-country-mismatch:"), "weights must be written back to disk");
+    assertTrue(written.contains("dormant-days:"), "v1.1 keys must be written back to disk");
+    assertTrue(written.contains("multi-account-new-source-2:"), "v1.1 weights must be written back to disk");
+    assertTrue(written.contains("kick-on:"), "enforcement keys must be written back to disk");
+    assertTrue(written.contains("shield-account-on:"), "enforcement keys must be written back to disk");
+    assertTrue(written.contains("protection-kick:"), "the protection kick message must be written back to disk");
+  }
+
+  /**
+   * Simulates upgrading from the v1 protection release: the config already has a protection
+   * section with the retired action-high/action-critical enforcement placeholders and a
+   * value the admin customized. The reload must keep the customization, append every new
+   * key with its default, and drop the retired keys - without any manual edit.
+   */
+  @Test
+  void v1ProtectionConfigMigratesToV2(@TempDir Path directory) throws Exception {
+    Path configFile = directory.resolve("config.yml");
+    Files.writeString(configFile, String.join("\n",
+        "prefix: \"LimboAuth &6>>&f\"",
+        "protection:",
+        "  enabled: true",
+        "  mode: MONITOR",
+        "  scoring:",
+        "    weights:",
+        "      geo-country-mismatch: 25",
+        "  enforcement:",
+        "    enabled: false",
+        "    action-high: NONE",
+        "    action-critical: NONE",
+        ""), StandardCharsets.UTF_8);
+
+    // Bootstrap once with a pristine config so the @Create sections exist regardless of
+    // which test in this JVM runs first, then capture the shipped default to restore.
+    Settings.IMP.reload(directory.resolve("bootstrap.yml").toFile(), Settings.IMP.PREFIX);
+    int defaultGeoWeight = Settings.IMP.PROTECTION.SCORING.WEIGHTS.GEO_COUNTRY_MISMATCH;
+    try {
+      Settings.IMP.reload(configFile.toFile(), Settings.IMP.PREFIX);
+
+      // The admin's customized weight survives the upgrade.
+      assertEquals(25, Settings.IMP.PROTECTION.SCORING.WEIGHTS.GEO_COUNTRY_MISMATCH);
+      // Untouched keys keep the values the v1 file pinned.
+      assertTrue(Settings.IMP.PROTECTION.ENABLED);
+      assertFalse(Settings.IMP.PROTECTION.ENFORCEMENT.ENABLED);
+      // Every key that did not exist in v1 appears with its v2 default.
+      assertEquals(15, Settings.IMP.PROTECTION.SCORING.WEIGHTS.IP_DISTINCT_TARGETS_4);
+      assertEquals(30, Settings.IMP.PROTECTION.SCORING.DORMANT_DAYS);
+      assertEquals("HIGH", Settings.IMP.PROTECTION.ENFORCEMENT.KICK_ON);
+      assertEquals("HIGH", Settings.IMP.PROTECTION.ENFORCEMENT.SHIELD_ACCOUNT_ON);
+      assertEquals(60, Settings.IMP.PROTECTION.ENFORCEMENT.SHIELD_MINUTES);
+
+      String written = Files.readString(configFile, StandardCharsets.UTF_8);
+      assertTrue(written.contains("geo-country-mismatch: 25"), "customized values must be preserved on disk");
+      assertTrue(written.contains("kick-on:"), "new enforcement keys must be appended");
+      assertFalse(written.contains("action-high:"), "retired v1 keys must be dropped from the rewritten config");
+      assertFalse(written.contains("action-critical:"), "retired v1 keys must be dropped from the rewritten config");
+    } finally {
+      // Settings is JVM-global and YamlConfig keeps current field values as the defaults
+      // it writes, so the customized weight must be restored by hand for the other tests.
+      Settings.IMP.PROTECTION.SCORING.WEIGHTS.GEO_COUNTRY_MISMATCH = defaultGeoWeight;
+    }
   }
 }

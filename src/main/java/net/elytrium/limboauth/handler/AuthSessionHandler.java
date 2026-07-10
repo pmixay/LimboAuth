@@ -134,6 +134,14 @@ public class AuthSessionHandler implements LimboSessionHandler {
   public void onSpawn(Limbo server, LimboPlayer player) {
     this.player = player;
 
+    // Enforcement gate: sources blocked by the account protection system are refused
+    // before any auth interaction, with a kick screen indistinguishable from the
+    // ordinary wrong-password kick.
+    if (this.plugin.getProtectionManager().shouldBlockJoin(this.proxyPlayer, this.playerInfo != null)) {
+      this.proxyPlayer.disconnect(this.plugin.getProtectionManager().getProtectionKick());
+      return;
+    }
+
     if (Settings.IMP.MAIN.DISABLE_FALLING) {
       this.player.disableFalling();
     } else {
@@ -252,7 +260,13 @@ public class AuthSessionHandler implements LimboSessionHandler {
         String password = args[1];
         this.saveTempPassword(password);
 
-        if (password.length() > 0 && checkPassword(password, this.playerInfo, this.playerDao)) {
+        // The shield makes even correct passwords take the regular wrong-password path.
+        // The hash is still verified first so a shielded reply has exactly the same timing
+        // as a genuine wrong password - a checker cannot detect the shield either way.
+        boolean passwordCorrect = password.length() > 0 && checkPassword(password, this.playerInfo, this.playerDao);
+        boolean shielded = this.plugin.getProtectionManager().isLoginShielded(this.playerInfo.getLowercaseNickname());
+
+        if (passwordCorrect && !shielded) {
           // Recorded before the TOTP gate: a correct password is a confirmed credential
           // hit for an attacker even when 2FA still blocks the actual join.
           this.recordAttempt(AttemptOutcome.LOGIN_SUCCESS, password);
@@ -340,6 +354,13 @@ public class AuthSessionHandler implements LimboSessionHandler {
           return;
         }
 
+        // A shielded account rejects even valid mod session tokens, with the generic
+        // expired-session reply so the shield stays invisible.
+        if (this.plugin.getProtectionManager().isLoginShielded(this.playerInfo.getLowercaseNickname())) {
+          this.proxyPlayer.sendMessage(sessionExpired);
+          return;
+        }
+
         this.finishAuth();
       }
     }
@@ -390,7 +411,9 @@ public class AuthSessionHandler implements LimboSessionHandler {
         .floodgate(this.plugin.isFloodgatePlayer(this.proxyPlayer.getUniqueId()));
 
     if (outcome != AttemptOutcome.REGISTER && this.playerInfo != null) {
-      builder.accountExists(true).storedLoginIp(this.playerInfo.getLoginIp());
+      builder.accountExists(true)
+          .storedLoginIp(this.playerInfo.getLoginIp())
+          .storedLoginDate(this.playerInfo.getLoginDate());
     }
 
     if (password != null) {
