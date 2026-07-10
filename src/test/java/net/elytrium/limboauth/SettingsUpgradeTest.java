@@ -50,8 +50,16 @@ class SettingsUpgradeTest {
     assertEquals("SOCIAL", Settings.IMP.PROTECTION.SOCIAL.TABLE_NAME);
     assertEquals(50, Settings.IMP.PROTECTION.SCORING.THRESHOLD_HIGH);
 
+    // v1.1 human-attacker tuning keys must appear on upgrade as well.
+    assertEquals(30, Settings.IMP.PROTECTION.SCORING.DORMANT_DAYS);
+    assertEquals(15, Settings.IMP.PROTECTION.SCORING.WEIGHTS.IP_DISTINCT_TARGETS_4);
+    assertEquals(15, Settings.IMP.PROTECTION.SCORING.WEIGHTS.MULTI_ACCOUNT_NEW_SOURCE_2);
+    assertEquals(15, Settings.IMP.PROTECTION.SCORING.WEIGHTS.DORMANT_ACCOUNT_TAKEOVER);
+
     String written = Files.readString(configFile, StandardCharsets.UTF_8);
     assertTrue(written.contains("protection:"), "the protection section must be written back to disk");
     assertTrue(written.contains("geo-country-mismatch:"), "weights must be written back to disk");
+    assertTrue(written.contains("dormant-days:"), "v1.1 keys must be written back to disk");
+    assertTrue(written.contains("multi-account-new-source-2:"), "v1.1 weights must be written back to disk");
   }
 }

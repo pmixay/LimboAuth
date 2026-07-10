@@ -22,6 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.net.InetAddress;
+import java.util.concurrent.TimeUnit;
 import net.elytrium.limboauth.protection.AttemptObservation;
 import net.elytrium.limboauth.protection.AttemptOutcome;
 import net.elytrium.limboauth.protection.Severity;
@@ -32,6 +33,8 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 class RiskScorerTest {
+
+  private static final long NOW = 1_700_000_000_000L;
 
   private final RiskScorer scorer = new RiskScorer();
 
@@ -44,7 +47,7 @@ class RiskScorerTest {
   void behaviorAloneNeverReachesSuspicious() throws Exception {
     // Instant first command from a brand-less client, but no volume/distribution signals at all.
     AttemptObservation observation = this.observation(AttemptOutcome.LOGIN_FAIL, true, 100, true, null);
-    RiskAssessment assessment = this.scorer.score(observation, this.snapshot(0, 0, 0, 0, 0, 0, 0, 0, 0, false), null, null);
+    RiskAssessment assessment = this.scorer.score(observation, this.snapshot(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, false), null, null);
     assertTrue(assessment.hasFactor(RiskFactor.INSTANT_FIRST_COMMAND));
     assertTrue(assessment.hasFactor(RiskFactor.MISSING_BRAND));
     assertFalse(assessment.severity().atLeast(Severity.SUSPICIOUS));
@@ -53,16 +56,25 @@ class RiskScorerTest {
   @Test
   void volumeTiersApply() throws Exception {
     AttemptObservation observation = this.observation(AttemptOutcome.LOGIN_FAIL, true, 5000, false, "vanilla");
-    assertEquals(10, this.scorer.score(observation, this.snapshot(6, 0, 0, 0, 0, 0, 0, 0, 0, false), null, null).score());
-    assertEquals(15, this.scorer.score(observation, this.snapshot(10, 0, 0, 0, 0, 0, 0, 0, 0, false), null, null).score());
-    assertEquals(20, this.scorer.score(observation, this.snapshot(20, 0, 0, 0, 0, 0, 0, 0, 0, false), null, null).score());
+    assertEquals(10, this.scorer.score(observation, this.snapshot(6, 0, 0, 0, 0, 0, 0, 0, 0, 0, false), null, null).score());
+    assertEquals(15, this.scorer.score(observation, this.snapshot(10, 0, 0, 0, 0, 0, 0, 0, 0, 0, false), null, null).score());
+    assertEquals(20, this.scorer.score(observation, this.snapshot(20, 0, 0, 0, 0, 0, 0, 0, 0, 0, false), null, null).score());
+  }
+
+  @Test
+  void distinctTargetTiersCoverHumanPace() throws Exception {
+    // 3 targets is still explainable by shared-IP mistypes (10); 4 leans checker (15).
+    AttemptObservation observation = this.observation(AttemptOutcome.LOGIN_FAIL, true, 5000, false, "vanilla");
+    assertEquals(10, this.scorer.score(observation, this.snapshot(0, 3, 0, 0, 0, 0, 0, 0, 0, 0, false), null, null).score());
+    assertEquals(15, this.scorer.score(observation, this.snapshot(0, 4, 0, 0, 0, 0, 0, 0, 0, 0, false), null, null).score());
+    assertEquals(20, this.scorer.score(observation, this.snapshot(0, 5, 0, 0, 0, 0, 0, 0, 0, 0, false), null, null).score());
   }
 
   @Test
   void singleVolumeCategoryIsCappedBelowHigh() throws Exception {
     AttemptObservation observation = this.observation(AttemptOutcome.LOGIN_FAIL, true, 5000, false, "vanilla");
     // Raw volume: 20 (fails) + 30 (10 targets) + 20 (subnet) = 70, capped at 35.
-    RiskAssessment assessment = this.scorer.score(observation, this.snapshot(20, 10, 0, 10, 3, 0, 0, 0, 0, false), null, null);
+    RiskAssessment assessment = this.scorer.score(observation, this.snapshot(20, 10, 0, 0, 10, 3, 0, 0, 0, 0, false), null, null);
     assertEquals(35, assessment.score());
     assertEquals(Severity.SUSPICIOUS, assessment.severity());
     assertFalse(assessment.severity().atLeast(Severity.HIGH));
@@ -71,9 +83,9 @@ class RiskScorerTest {
   @Test
   void subnetFactorRequiresMultipleSourceIps() throws Exception {
     AttemptObservation observation = this.observation(AttemptOutcome.LOGIN_FAIL, true, 5000, false, "vanilla");
-    RiskAssessment single = this.scorer.score(observation, this.snapshot(0, 0, 0, 10, 1, 0, 0, 0, 0, false), null, null);
+    RiskAssessment single = this.scorer.score(observation, this.snapshot(0, 0, 0, 0, 10, 1, 0, 0, 0, 0, false), null, null);
     assertFalse(single.hasFactor(RiskFactor.SUBNET_DISTINCT_TARGETS));
-    RiskAssessment multiple = this.scorer.score(observation, this.snapshot(0, 0, 0, 10, 2, 0, 0, 0, 0, false), null, null);
+    RiskAssessment multiple = this.scorer.score(observation, this.snapshot(0, 0, 0, 0, 10, 2, 0, 0, 0, 0, false), null, null);
     assertTrue(multiple.hasFactor(RiskFactor.SUBNET_DISTINCT_TARGETS));
   }
 
@@ -81,7 +93,7 @@ class RiskScorerTest {
   void successAfterOwnFailuresFromSameIpIsNotConfirmed() throws Exception {
     // The classic forgotten-password case: failures exist, but all from the player's own IP.
     AttemptObservation observation = this.observation(AttemptOutcome.LOGIN_SUCCESS, true, 8000, false, "vanilla");
-    RiskAssessment assessment = this.scorer.score(observation, this.snapshot(8, 1, 0, 0, 0, 0, 1, 0, 0, false), null, null);
+    RiskAssessment assessment = this.scorer.score(observation, this.snapshot(8, 1, 0, 0, 0, 0, 0, 1, 0, 0, false), null, null);
     assertFalse(assessment.hasFactor(RiskFactor.CONFIRM_SUCCESS_AFTER_DISTRIBUTED_FAILURES));
     assertFalse(assessment.hasFactor(RiskFactor.CONFIRM_SUCCESS_FROM_FLAGGED_SOURCE));
     assertFalse(assessment.hasFactor(RiskFactor.CONFIRM_SPRAYED_PASSWORD_SUCCESS));
@@ -91,7 +103,7 @@ class RiskScorerTest {
   @Test
   void successAfterDistributedFailuresIsCritical() throws Exception {
     AttemptObservation observation = this.observation(AttemptOutcome.LOGIN_SUCCESS, true, 8000, false, "vanilla");
-    RiskAssessment assessment = this.scorer.score(observation, this.snapshot(0, 0, 0, 0, 0, 0, 2, 2, 0, false), null, null);
+    RiskAssessment assessment = this.scorer.score(observation, this.snapshot(0, 0, 0, 0, 0, 0, 0, 2, 2, 0, false), null, null);
     assertTrue(assessment.hasFactor(RiskFactor.CONFIRM_SUCCESS_AFTER_DISTRIBUTED_FAILURES));
     assertEquals(Severity.CRITICAL, assessment.severity());
     assertEquals("account:target", assessment.clusterKey());
@@ -100,7 +112,7 @@ class RiskScorerTest {
   @Test
   void sprayedPasswordSuccessIsCritical() throws Exception {
     AttemptObservation observation = this.observation(AttemptOutcome.LOGIN_SUCCESS, true, 8000, false, "vanilla");
-    RiskAssessment assessment = this.scorer.score(observation, this.snapshot(0, 0, 0, 0, 0, 0, 0, 0, 3, false), null, null);
+    RiskAssessment assessment = this.scorer.score(observation, this.snapshot(0, 0, 0, 0, 0, 0, 0, 0, 0, 3, false), null, null);
     assertTrue(assessment.hasFactor(RiskFactor.CONFIRM_SPRAYED_PASSWORD_SUCCESS));
     assertTrue(assessment.severity().atLeast(Severity.CRITICAL));
   }
@@ -108,7 +120,7 @@ class RiskScorerTest {
   @Test
   void failedSprayIsNotConfirmation() throws Exception {
     AttemptObservation observation = this.observation(AttemptOutcome.LOGIN_FAIL, true, 8000, false, "vanilla");
-    RiskAssessment assessment = this.scorer.score(observation, this.snapshot(0, 0, 0, 0, 0, 0, 0, 0, 5, false), null, null);
+    RiskAssessment assessment = this.scorer.score(observation, this.snapshot(0, 0, 0, 0, 0, 0, 0, 0, 0, 5, false), null, null);
     assertTrue(assessment.hasFactor(RiskFactor.PASSWORD_SPRAY));
     assertFalse(assessment.hasFactor(RiskFactor.CONFIRM_SPRAYED_PASSWORD_SUCCESS));
     assertFalse(assessment.severity().atLeast(Severity.HIGH));
@@ -118,7 +130,7 @@ class RiskScorerTest {
   void geoIsCappedAndCountryMismatchIsStrong() throws Exception {
     AttemptObservation observation = this.observation(AttemptOutcome.LOGIN_FAIL, true, 8000, false, "vanilla");
     GeoIpResult geo = new GeoIpResult("DE", 12345L, "Example Hosting GmbH");
-    RiskAssessment assessment = this.scorer.score(observation, this.snapshot(0, 0, 0, 0, 0, 0, 0, 0, 0, false), geo, "RU");
+    RiskAssessment assessment = this.scorer.score(observation, this.snapshot(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, false), geo, "RU");
     assertTrue(assessment.hasFactor(RiskFactor.GEO_COUNTRY_MISMATCH));
     assertTrue(assessment.hasFactor(RiskFactor.GEO_HOSTING_ASN));
     // Raw 20 + 10 = 30, equal to the GEO cap: alone it can reach SUSPICIOUS but never HIGH.
@@ -129,27 +141,71 @@ class RiskScorerTest {
   @Test
   void churnRequiresThreeSessions() throws Exception {
     AttemptObservation observation = this.observation(AttemptOutcome.LOGIN_FAIL, true, 8000, false, "vanilla");
-    assertFalse(this.scorer.score(observation, this.snapshot(0, 0, 2, 0, 0, 0, 0, 0, 0, false), null, null)
+    assertFalse(this.scorer.score(observation, this.snapshot(0, 0, 2, 0, 0, 0, 0, 0, 0, 0, false), null, null)
         .hasFactor(RiskFactor.CHURN_SESSIONS));
-    assertTrue(this.scorer.score(observation, this.snapshot(0, 0, 3, 0, 0, 0, 0, 0, 0, false), null, null)
+    assertTrue(this.scorer.score(observation, this.snapshot(0, 0, 3, 0, 0, 0, 0, 0, 0, 0, false), null, null)
         .hasFactor(RiskFactor.CHURN_SESSIONS));
+  }
+
+  @Test
+  void multiAccountNewSourceRequiresTwoAccounts() throws Exception {
+    AttemptObservation observation = this.observation(AttemptOutcome.LOGIN_SUCCESS, true, 8000, false, "vanilla");
+    RiskAssessment single = this.scorer.score(observation, this.snapshot(0, 0, 0, 1, 0, 0, 0, 0, 0, 0, false), null, null);
+    assertFalse(single.hasFactor(RiskFactor.MULTI_ACCOUNT_NEW_SOURCE_SUCCESS));
+    RiskAssessment multiple = this.scorer.score(observation, this.snapshot(0, 0, 0, 2, 0, 0, 0, 0, 0, 0, false), null, null);
+    assertTrue(multiple.hasFactor(RiskFactor.MULTI_ACCOUNT_NEW_SOURCE_SUCCESS));
+    // 15 points: on its own this stays an INFO breadcrumb, never an alert-worthy severity.
+    assertEquals(15, multiple.score());
+    assertFalse(multiple.severity().atLeast(Severity.SUSPICIOUS));
+  }
+
+  @Test
+  void dormantTakeoverRequiresSuccessDormancyAndNewSubnet() throws Exception {
+    AggregateSnapshot quiet = this.snapshot(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, false);
+
+    RiskAssessment takeover = this.scorer.score(this.dormant(AttemptOutcome.LOGIN_SUCCESS, "198.51.100.44", 45), quiet, null, null);
+    assertTrue(takeover.hasFactor(RiskFactor.DORMANT_ACCOUNT_TAKEOVER));
+    assertEquals(15, takeover.score());
+
+    RiskAssessment failed = this.scorer.score(this.dormant(AttemptOutcome.LOGIN_FAIL, "198.51.100.44", 45), quiet, null, null);
+    assertFalse(failed.hasFactor(RiskFactor.DORMANT_ACCOUNT_TAKEOVER));
+
+    // Same /24 as the stored login: the regular comeback of a regular player.
+    RiskAssessment sameSubnet = this.scorer.score(this.dormant(AttemptOutcome.LOGIN_SUCCESS, "203.0.113.200", 45), quiet, null, null);
+    assertFalse(sameSubnet.hasFactor(RiskFactor.DORMANT_ACCOUNT_TAKEOVER));
+
+    RiskAssessment recent = this.scorer.score(this.dormant(AttemptOutcome.LOGIN_SUCCESS, "198.51.100.44", 5), quiet, null, null);
+    assertFalse(recent.hasFactor(RiskFactor.DORMANT_ACCOUNT_TAKEOVER));
+
+    RiskAssessment noDate = this.scorer.score(this.dormant(AttemptOutcome.LOGIN_SUCCESS, "198.51.100.44", 0), quiet, null, null);
+    assertFalse(noDate.hasFactor(RiskFactor.DORMANT_ACCOUNT_TAKEOVER));
+  }
+
+  @Test
+  void dormantTakeoverWithGeoMismatchReachesSuspicious() throws Exception {
+    AggregateSnapshot quiet = this.snapshot(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, false);
+    GeoIpResult geo = new GeoIpResult("DE", null, null);
+    RiskAssessment assessment = this.scorer.score(this.dormant(AttemptOutcome.LOGIN_SUCCESS, "198.51.100.44", 45), quiet, geo, "FR");
+    // 15 (dormant takeover) + 20 (country mismatch) = 35.
+    assertTrue(assessment.severity().atLeast(Severity.SUSPICIOUS));
+    assertFalse(assessment.severity().atLeast(Severity.HIGH));
   }
 
   @Test
   void clusterKeyPrefersSprayOverIp() throws Exception {
     AttemptObservation observation = this.observation(AttemptOutcome.LOGIN_FAIL, true, 8000, false, "vanilla");
-    RiskAssessment assessment = this.scorer.score(observation, this.snapshot(0, 0, 0, 0, 0, 0, 0, 0, 5, false), null, null);
+    RiskAssessment assessment = this.scorer.score(observation, this.snapshot(0, 0, 0, 0, 0, 0, 0, 0, 0, 5, false), null, null);
     assertTrue(assessment.clusterKey().startsWith("spray:"));
-    RiskAssessment plain = this.scorer.score(observation, this.snapshot(20, 0, 0, 0, 0, 0, 0, 0, 0, false), null, null);
+    RiskAssessment plain = this.scorer.score(observation, this.snapshot(20, 0, 0, 0, 0, 0, 0, 0, 0, 0, false), null, null);
     assertTrue(plain.clusterKey().startsWith("ip:"));
   }
 
-  private AggregateSnapshot snapshot(int ipFailures, int ipDistinctFailedTargets, int ipChurnSessions,
+  private AggregateSnapshot snapshot(int ipFailures, int ipDistinctFailedTargets, int ipChurnSessions, int ipDistinctNewSourceSuccesses,
                                      int subnetDistinctFailedTargets, int subnetDistinctIps, int subnetChurnSessions,
                                      int accountDistinctFailIps, int accountFailsFromOtherIps,
                                      int fingerprintDistinctTargets, boolean sourceFlagged) {
-    return new AggregateSnapshot(ipFailures, ipDistinctFailedTargets, ipChurnSessions, subnetDistinctFailedTargets,
-        subnetDistinctIps, subnetChurnSessions, accountDistinctFailIps, accountFailsFromOtherIps,
+    return new AggregateSnapshot(ipFailures, ipDistinctFailedTargets, ipChurnSessions, ipDistinctNewSourceSuccesses,
+        subnetDistinctFailedTargets, subnetDistinctIps, subnetChurnSessions, accountDistinctFailIps, accountFailsFromOtherIps,
         fingerprintDistinctTargets, sourceFlagged);
   }
 
@@ -162,5 +218,17 @@ class RiskScorerTest {
         .clientBrand(brand)
         .fingerprint(42L);
     return builder.build();
+  }
+
+  private AttemptObservation dormant(AttemptOutcome outcome, String storedIp, int storedDaysAgo) throws Exception {
+    return AttemptObservation.builder("veteran", InetAddress.getByName("203.0.113.7"), outcome)
+        .accountExists(true)
+        .timestamp(NOW)
+        .millisSinceJoin(8000)
+        .clientBrand("vanilla")
+        .storedLoginIp(storedIp)
+        .storedLoginDate(storedDaysAgo == 0 ? 0 : NOW - TimeUnit.DAYS.toMillis(storedDaysAgo))
+        .fingerprint(42L)
+        .build();
   }
 }

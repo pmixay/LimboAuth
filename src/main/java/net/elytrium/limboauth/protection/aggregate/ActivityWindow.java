@@ -140,6 +140,23 @@ public class ActivityWindow {
     return count;
   }
 
-  public record AttemptEvent(long time, String nickname, boolean accountExists, String ip, AttemptOutcome outcome, boolean churn) {
+  /**
+   * Distinct accounts successfully logged into from this source while the account's stored
+   * LOGINIP pointed elsewhere. Alts relogged by their owner keep their stored IP and are
+   * excluded, so this only counts takeover-shaped successes.
+   */
+  public int distinctNewSourceSuccesses(long since) {
+    Set<String> targets = new HashSet<>();
+    for (AttemptEvent event : this.events) {
+      if (event.time() >= since && event.newSource()) {
+        targets.add(event.nickname());
+      }
+    }
+
+    return targets.size();
+  }
+
+  public record AttemptEvent(long time, String nickname, boolean accountExists, String ip, AttemptOutcome outcome, boolean churn,
+                             boolean newSource) {
   }
 }

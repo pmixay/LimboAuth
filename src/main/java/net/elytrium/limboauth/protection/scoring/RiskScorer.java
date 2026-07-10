@@ -22,12 +22,14 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
 import net.elytrium.limboauth.Settings;
 import net.elytrium.limboauth.protection.AttemptObservation;
 import net.elytrium.limboauth.protection.AttemptOutcome;
 import net.elytrium.limboauth.protection.Severity;
+import net.elytrium.limboauth.protection.SubnetKey;
 import net.elytrium.limboauth.protection.aggregate.AggregateSnapshot;
 import net.elytrium.limboauth.protection.geoip.GeoIpResult;
 import org.checkerframework.checker.nullness.qual.Nullable;
@@ -58,13 +60,14 @@ public class RiskScorer {
         new int[] {20, 10, 6}, new int[] {weights.IP_FAIL_RATE_20, weights.IP_FAIL_RATE_10, weights.IP_FAIL_RATE_6},
         snapshot.ipFailures() + " failed logins from this IP in the volume window");
     volume += this.tiered(contributions, RiskFactor.IP_DISTINCT_TARGETS, snapshot.ipDistinctFailedTargets(),
-        new int[] {10, 5, 3}, new int[] {weights.IP_DISTINCT_TARGETS_10, weights.IP_DISTINCT_TARGETS_5, weights.IP_DISTINCT_TARGETS_3},
-        snapshot.ipDistinctFailedTargets() + " distinct accounts failed from this IP in the volume window");
+        new int[] {10, 5, 4, 3},
+        new int[] {weights.IP_DISTINCT_TARGETS_10, weights.IP_DISTINCT_TARGETS_5, weights.IP_DISTINCT_TARGETS_4, weights.IP_DISTINCT_TARGETS_3},
+        snapshot.ipDistinctFailedTargets() + " distinct accounts failed from this IP in the distribution window");
     if (snapshot.subnetDistinctIps() >= 2) {
       volume += this.tiered(contributions, RiskFactor.SUBNET_DISTINCT_TARGETS, snapshot.subnetDistinctFailedTargets(),
           new int[] {10, 5}, new int[] {weights.SUBNET_DISTINCT_TARGETS_10, weights.SUBNET_DISTINCT_TARGETS_5},
           snapshot.subnetDistinctFailedTargets() + " distinct accounts failed from this subnet ("
-              + snapshot.subnetDistinctIps() + " source IPs) in the volume window");
+              + snapshot.subnetDistinctIps() + " source IPs) in the distribution window");
     }
 
     int distribution = 0;
@@ -77,7 +80,11 @@ public class RiskScorer {
     int churnSessions = Math.max(snapshot.ipChurnSessions(), snapshot.subnetChurnSessions());
     distribution += this.tiered(contributions, RiskFactor.CHURN_SESSIONS, churnSessions,
         new int[] {3}, new int[] {weights.CHURN_SESSIONS_3},
-        churnSessions + " short join-attempt-quit sessions from this source in the volume window");
+        churnSessions + " short join-attempt-quit sessions from this source in the distribution window");
+    distribution += this.tiered(contributions, RiskFactor.MULTI_ACCOUNT_NEW_SOURCE_SUCCESS, snapshot.ipDistinctNewSourceSuccesses(),
+        new int[] {2}, new int[] {weights.MULTI_ACCOUNT_NEW_SOURCE_2},
+        snapshot.ipDistinctNewSourceSuccesses() + " accounts whose last login came from elsewhere were logged into from this IP");
+    distribution += this.dormantTakeover(contributions, observation, weights, scoring);
 
     int behavior = 0;
     if (!(observation.isFloodgate() && scoring.SKIP_BEHAVIOR_FOR_FLOODGATE)) {
@@ -153,6 +160,32 @@ public class RiskScorer {
     }
 
     return new RiskAssessment(score, severity, List.copyOf(contributions), this.clusterKey(observation, contributions, confirmation > 0));
+  }
+
+  /**
+   * A successful login on a long-dormant account from a different subnet than its stored
+   * LOGINIP. Requires both conditions at once so a returning player scores nothing when
+   * they come back from their usual network, and a merely traveling player is caught by
+   * the GEO factor alone (INFO) rather than this one.
+   */
+  private int dormantTakeover(List<FactorContribution> contributions, AttemptObservation observation,
+                              Settings.PROTECTION.SCORING.WEIGHTS weights, Settings.PROTECTION.SCORING scoring) {
+    if (observation.getOutcome() != AttemptOutcome.LOGIN_SUCCESS || observation.getStoredLoginDate() <= 0) {
+      return 0;
+    }
+
+    long dormantMillis = observation.getTimestamp() - observation.getStoredLoginDate();
+    if (dormantMillis < TimeUnit.DAYS.toMillis(Math.max(1, scoring.DORMANT_DAYS))) {
+      return 0;
+    }
+
+    String storedSubnet = SubnetKey.ofLiteral(observation.getStoredLoginIp());
+    if (storedSubnet == null || storedSubnet.equals(observation.getSubnetKey())) {
+      return 0;
+    }
+
+    return this.add(contributions, RiskFactor.DORMANT_ACCOUNT_TAKEOVER, weights.DORMANT_ACCOUNT_TAKEOVER,
+        "successful login on an account dormant for " + TimeUnit.MILLISECONDS.toDays(dormantMillis) + " days from a new subnet");
   }
 
   private String clusterKey(AttemptObservation observation, List<FactorContribution> contributions, boolean confirmed) {

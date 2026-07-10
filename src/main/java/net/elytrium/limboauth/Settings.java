@@ -546,9 +546,13 @@ public class Settings extends YamlConfig {
 
     public static class WINDOWS {
 
-      @Comment("Short window for single-source volume signals, milliseconds (10 minutes)")
+      @Comment("Short window for fast-source signals (raw fail rate), milliseconds (10 minutes)")
       public long VOLUME_WINDOW_MILLIS = 600000;
-      @Comment("Long window for distributed / low-and-slow signals, milliseconds (60 minutes)")
+      @Comment({
+          "Long window for distributed, low-and-slow and human-paced signals, milliseconds (60 minutes).",
+          "Distinct-target and churn counts use this window: a human checking leaked credentials",
+          "spreads a handful of attempts across an hour."
+      })
       public long DISTRIBUTION_WINDOW_MILLIS = 3600000;
       @Comment("Sessions shorter than this count as \"churn\" (join -> few attempts -> quit), milliseconds")
       public long CHURN_SESSION_MILLIS = 20000;
@@ -589,6 +593,9 @@ public class Settings extends YamlConfig {
       @Comment("First login command sent within this time after spawning counts as \"instant\" (milliseconds)")
       public long FAST_FIRST_COMMAND_MILLIS = 1000;
 
+      @Comment("An account is \"dormant\" when its last successful login is older than this many days")
+      public int DORMANT_DAYS = 30;
+
       @Comment({
           "Java regexes matched against the client brand. Empty by default to avoid false positives.",
           "Example: [\"(?i).*console.*\", \"(?i)wurst.*\"]"
@@ -611,8 +618,9 @@ public class Settings extends YamlConfig {
         public int IP_FAIL_RATE_6 = 10;
         public int IP_FAIL_RATE_10 = 15;
         public int IP_FAIL_RATE_20 = 20;
-        @Comment("Distinct existing accounts with failed logins from one IP in the volume window")
+        @Comment("Distinct existing accounts with failed logins from one IP in the distribution window")
         public int IP_DISTINCT_TARGETS_3 = 10;
+        public int IP_DISTINCT_TARGETS_4 = 15;
         public int IP_DISTINCT_TARGETS_5 = 20;
         public int IP_DISTINCT_TARGETS_10 = 30;
         @Comment("Distinct existing accounts with failed logins from one subnet (needs >= 2 source IPs)")
@@ -624,8 +632,15 @@ public class Settings extends YamlConfig {
         @Comment("The same password tried against multiple existing accounts in the distribution window")
         public int PASSWORD_SPRAY_3 = 20;
         public int PASSWORD_SPRAY_8 = 35;
-        @Comment("Short join -> few attempts -> quit sessions from one IP or subnet in the volume window")
+        @Comment("Short join -> few attempts -> quit sessions from one IP or subnet in the distribution window")
         public int CHURN_SESSIONS_3 = 15;
+        @Comment({
+            "One IP successfully logging into multiple accounts whose stored last-login IP was a different",
+            "address. Own alts keep their stored IP, so relogging your own accounts never triggers this."
+        })
+        public int MULTI_ACCOUNT_NEW_SOURCE_2 = 15;
+        @Comment("Successful login on a dormant account (see dormant-days) from a different subnet than its last login")
+        public int DORMANT_ACCOUNT_TAKEOVER = 15;
         @Comment("First login command sent almost instantly after spawn")
         public int INSTANT_FIRST_COMMAND = 5;
         @Comment("Client never sent a brand plugin message before the attempt")

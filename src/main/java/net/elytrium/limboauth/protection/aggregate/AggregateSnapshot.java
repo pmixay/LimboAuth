@@ -25,6 +25,7 @@ public record AggregateSnapshot(
     int ipFailures,
     int ipDistinctFailedTargets,
     int ipChurnSessions,
+    int ipDistinctNewSourceSuccesses,
     int subnetDistinctFailedTargets,
     int subnetDistinctIps,
     int subnetChurnSessions,

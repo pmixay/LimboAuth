@@ -55,6 +55,39 @@ class ProtectionAggregatorTest {
   }
 
   @Test
+  void humanPacedTargetsCountAcrossDistributionWindow() throws Exception {
+    ProtectionAggregator aggregator = new ProtectionAggregator();
+    long now = 1_000_000_000L;
+
+    // Two failed accounts 30 minutes apart: far outside the 10-minute volume window,
+    // but a human working through leaked credentials must still be seen as one campaign.
+    aggregator.update(this.attempt("victim0", "203.0.113.7", now, AttemptOutcome.LOGIN_FAIL, 1L));
+    AttemptObservation last = this.attempt("victim1", "203.0.113.7", now + 30L * 60000, AttemptOutcome.LOGIN_FAIL, 2L);
+    aggregator.update(last);
+
+    AggregateSnapshot snapshot = aggregator.snapshot(last);
+    assertEquals(1, snapshot.ipFailures());
+    assertEquals(2, snapshot.ipDistinctFailedTargets());
+  }
+
+  @Test
+  void newSourceSuccessesCountDistinctAccountsFromElsewhere() throws Exception {
+    ProtectionAggregator aggregator = new ProtectionAggregator();
+    long now = 1_000_000_000L;
+    String ip = "203.0.113.7";
+
+    aggregator.update(this.success("stolen1", ip, now, "198.51.100.1"));
+    aggregator.update(this.success("stolen2", ip, now + 60000, "198.51.100.2"));
+    // Own alt: its stored login IP is the current address, so it is not a "new source".
+    aggregator.update(this.success("ownalt", ip, now + 120000, ip));
+    // Failures never count, whatever their stored IP says.
+    AttemptObservation fail = this.attempt("other", ip, now + 180000, AttemptOutcome.LOGIN_FAIL, 9L);
+    aggregator.update(fail);
+
+    assertEquals(2, aggregator.snapshot(fail).ipDistinctNewSourceSuccesses());
+  }
+
+  @Test
   void accountUnderDistributedAttackCountsOtherIpsOnly() throws Exception {
     ProtectionAggregator aggregator = new ProtectionAggregator();
     long now = 1_000_000_000L;
@@ -141,6 +174,16 @@ class ProtectionAggregatorTest {
         .timestamp(time)
         .millisSinceJoin(5000)
         .fingerprint(fingerprint)
+        .build();
+  }
+
+  private AttemptObservation success(String nickname, String ip, long time, String storedLoginIp) throws Exception {
+    return AttemptObservation.builder(nickname, InetAddress.getByName(ip), AttemptOutcome.LOGIN_SUCCESS)
+        .accountExists(true)
+        .timestamp(time)
+        .millisSinceJoin(5000)
+        .storedLoginIp(storedLoginIp)
+        .fingerprint(7L)
         .build();
   }
 }

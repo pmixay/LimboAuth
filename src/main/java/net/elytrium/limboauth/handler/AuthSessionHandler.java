@@ -390,7 +390,9 @@ public class AuthSessionHandler implements LimboSessionHandler {
         .floodgate(this.plugin.isFloodgatePlayer(this.proxyPlayer.getUniqueId()));
 
     if (outcome != AttemptOutcome.REGISTER && this.playerInfo != null) {
-      builder.accountExists(true).storedLoginIp(this.playerInfo.getLoginIp());
+      builder.accountExists(true)
+          .storedLoginIp(this.playerInfo.getLoginIp())
+          .storedLoginDate(this.playerInfo.getLoginDate());
     }
 
     if (password != null) {
