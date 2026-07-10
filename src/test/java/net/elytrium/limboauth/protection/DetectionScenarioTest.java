@@ -196,6 +196,39 @@ class DetectionScenarioTest {
   }
 
   /**
+   * FPR anchor for the widened 60-minute counting: three players behind one shared IP,
+   * each mistyping twice, spread across nearly an hour. All six failures now land in the
+   * same distribution window, and the total must still stay below SUSPICIOUS.
+   */
+  @Test
+  void sharedIpMistypesSpreadOverAnHourStayBelowSuspicious() throws Exception {
+    ProtectionAggregator aggregator = new ProtectionAggregator();
+    RiskScorer scorer = new RiskScorer();
+    long now = 1_700_000_000_000L;
+
+    Severity worst = Severity.NONE;
+    for (int player = 0; player < 3; ++player) {
+      for (int attempt = 0; attempt < 2; ++attempt) {
+        AttemptObservation fail = AttemptObservation
+            .builder("classmate" + player, InetAddress.getByName("192.0.2.50"), AttemptOutcome.LOGIN_FAIL)
+            .accountExists(true)
+            .timestamp(now + (player * 2L + attempt) * 11L * 60000)
+            .millisSinceJoin(5000)
+            .clientBrand("fabric")
+            .fingerprint(5000L + player * 10L + attempt)
+            .build();
+        aggregator.update(fail);
+        RiskAssessment assessment = scorer.score(fail, aggregator.snapshot(fail), null, null);
+        if (assessment.severity().atLeast(worst)) {
+          worst = assessment.severity();
+        }
+      }
+    }
+
+    assertFalse(worst.atLeast(Severity.SUSPICIOUS), "hour-spread shared-IP mistypes must stay below SUSPICIOUS, got " + worst);
+  }
+
+  /**
    * The v1.1 threat model: a person looks up leaked passwords on a website and manually
    * checks four existing accounts from one IP over 40 minutes, with a normal client,
    * disconnecting between accounts. Far too slow for the volume window, but the
