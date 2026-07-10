@@ -40,7 +40,7 @@ public class LimboAuthCommand extends RatelimitedCommand {
 
   private static final Component AVAILABLE_SUBCOMMANDS_MESSAGE = Component.text("Available subcommands:", NamedTextColor.WHITE);
   private static final Component NO_AVAILABLE_SUBCOMMANDS_MESSAGE = Component.text("There is no available subcommands for you.", NamedTextColor.WHITE);
-  private static final List<String> PROTECTION_SUBCOMMANDS = List.of("status", "stats", "recent", "blocks", "unblock", "test-webhook");
+  private static final List<String> PROTECTION_SUBCOMMANDS = List.of("status", "stats", "recent", "inspect", "blocks", "unblock", "test-webhook");
 
   private final LimboAuth plugin;
 

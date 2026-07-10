@@ -108,6 +108,53 @@ class EnforcementScenarioTest {
   }
 
   /**
+   * The finding-B shape under ENFORCE: a checker fails four other players' accounts
+   * (each stored on another network), then hits a fifth. The multi-target-source
+   * confirmation must push the success to HIGH so the default thresholds kick the
+   * session, block the source and shield the account - no GeoIP, no dormancy needed.
+   */
+  @Test
+  void checkerHitAfterForeignFailuresIsKickedBlockedAndShielded() throws Exception {
+    Harness harness = new Harness();
+    String checkerIp = "185.159.162.53";
+
+    for (int i = 0; i < 4; ++i) {
+      RiskAssessment assessment = harness.observe(AttemptObservation
+          .builder("cracked" + i, InetAddress.getByName(checkerIp), AttemptOutcome.LOGIN_FAIL)
+          .accountExists(true)
+          .timestamp(NOW + i * 7L * 60000)
+          .millisSinceJoin(3000)
+          .firstAttemptOfSession(true)
+          .clientBrand("vanilla")
+          .storedLoginIp("192.0.2." + (10 + i))
+          .fingerprint(6100L + i)
+          .build());
+      assertFalse(assessment.severity().atLeast(Severity.HIGH),
+          "foreign failures alone must not be enforced against, got " + assessment.severity() + " at account " + i);
+    }
+
+    assertTrue(harness.kicked.isEmpty(), "no enforcement before the confident moment");
+
+    long hitTime = NOW + 30L * 60000;
+    harness.clock.set(hitTime);
+    RiskAssessment hit = harness.observe(AttemptObservation
+        .builder("finsterry", InetAddress.getByName(checkerIp), AttemptOutcome.LOGIN_SUCCESS)
+        .accountExists(true)
+        .timestamp(hitTime)
+        .millisSinceJoin(3000)
+        .firstAttemptOfSession(true)
+        .clientBrand("vanilla")
+        .storedLoginIp("192.0.2.99")
+        .fingerprint(6200L)
+        .build());
+
+    assertTrue(hit.severity().atLeast(Severity.HIGH), "the checker's hit must be HIGH, got " + hit.severity());
+    assertEquals(List.of("finsterry@" + checkerIp), harness.kicked);
+    assertTrue(harness.state.isSourceBlocked(checkerIp));
+    assertTrue(harness.state.isAccountShielded("finsterry"));
+  }
+
+  /**
    * FPR guard: the forgotten-password player - failures and the eventual success all from
    * their own IP - must never be kicked, blocked or shielded.
    */

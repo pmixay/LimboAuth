@@ -1,10 +1,29 @@
 # Account Protection — Tuning & Improvement Plan
 
-Status: proposed (not yet implemented). Written after the first monitor-mode data
-from production. Branch: `claude/account-protection-system-3ojjmd` (PR #3).
+Status: **§3 and §4.3 implemented** (branch `claude/account-protection-improvements-b8oke2`);
+§4.1 (enable GeoIP) and §4.2 (enforcement rollout) remain operational decisions for the
+server owner. Originally written after the first monitor-mode data from production
+(branch `claude/account-protection-system-3ojjmd`, PR #3).
 
-This document describes concrete fixes and improvements the live data revealed. It does
-**not** change behavior on its own — it is the work list for the next change.
+Implementation notes (deviations are refinements, not behavior changes):
+
+- §3.1: `foreignTarget` lives on the shared `ActivityWindow.AttemptEvent`
+  (now a class, not a record, to also carry the §3.4 "already alerted" marker);
+  `AggregateSnapshot` gained `foreignFingerprintTargets` / `foreignFailedTargets`,
+  appended at the end as specified.
+- §3.2: gated by `scoring.spray-foreign-target-min` (default 2). The base
+  `PASSWORD_SPRAY` tiers keep counting all targets (the optional part was skipped, as
+  suggested — 20 points is INFO-level noise and still a useful breadcrumb).
+- §3.3: `CONFIRM_SUCCESS_FROM_MULTI_TARGET_SOURCE`, tiers ≥3 → 50 / ≥6 → 80 via
+  `confirm-success-from-multi-target-source-3/-6`.
+- §3.4: `RetroactiveElevation` triggers exactly on tier crossings (count sampled before
+  and after each attempt is folded in), scans the source's existing ip window, and
+  marks reported successes on the shared event so a hit is alerted at most once.
+  Dispatch-only, as planned: retroactive alerts never enforce.
+- §4.3: `/limboauth protection inspect <nickname>` shows the stored events for one
+  account with the full factor breakdown.
+
+This document describes concrete fixes and improvements the live data revealed.
 
 ---
 

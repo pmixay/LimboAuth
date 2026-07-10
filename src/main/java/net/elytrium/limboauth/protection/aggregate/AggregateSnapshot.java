@@ -19,7 +19,12 @@ package net.elytrium.limboauth.protection.aggregate;
 
 /**
  * Immutable numbers the risk scorer consumes, computed for one attempt after
- * that attempt was folded into the sliding windows.
+ * that attempt was folded into the sliding windows. New components are appended
+ * at the end - the constructor is positional and tests wire it by position.
+ *
+ * <p>The two "foreign" counts only include targets whose stored LOGINIP sits on a
+ * different subnet than the source of the attempt, so same-owner alt families
+ * contribute nothing to them.
  */
 public record AggregateSnapshot(
     int ipFailures,
@@ -32,5 +37,7 @@ public record AggregateSnapshot(
     int accountDistinctFailIps,
     int accountFailsFromOtherIps,
     int fingerprintDistinctTargets,
-    boolean sourceFlagged) {
+    boolean sourceFlagged,
+    int foreignFingerprintTargets,
+    int foreignFailedTargets) {
 }

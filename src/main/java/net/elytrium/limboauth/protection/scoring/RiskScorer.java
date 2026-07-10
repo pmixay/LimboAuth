@@ -44,6 +44,13 @@ import org.checkerframework.checker.nullness.qual.Nullable;
  */
 public class RiskScorer {
 
+  /**
+   * Foreign-failed-target counts at which the multi-target-source confirmation escalates,
+   * descending as {@link #tiered} expects. Shared with the retroactive pass through
+   * {@link #crossedMultiTargetTier} so both react at exactly the same boundaries.
+   */
+  private static final int[] MULTI_TARGET_SOURCE_TIERS = {6, 3};
+
   private volatile List<String> brandRegexSource;
   private volatile List<Pattern> brandPatterns = List.of();
   private volatile List<String> hostingAsnSource;
@@ -133,11 +140,19 @@ public class RiskScorer {
             weights.CONFIRM_SUCCESS_FROM_FLAGGED_SOURCE, "successful login from a source flagged HIGH before this attempt");
       }
 
-      if (snapshot.fingerprintDistinctTargets() >= 3) {
+      // Foreign targets only: one person reusing one password across their own alts
+      // (stored LOGINIP on the source's subnet) satisfies the raw distinct-target count
+      // but is not a spray, so the count that confirms must exclude the owner's accounts.
+      if (snapshot.foreignFingerprintTargets() >= Math.max(1, scoring.SPRAY_FOREIGN_TARGET_MIN)) {
         confirmation += this.add(contributions, RiskFactor.CONFIRM_SPRAYED_PASSWORD_SUCCESS,
             weights.CONFIRM_SPRAYED_PASSWORD_SUCCESS,
-            "the successful password was sprayed against " + snapshot.fingerprintDistinctTargets() + " accounts");
+            "the successful password was sprayed against " + snapshot.foreignFingerprintTargets() + " accounts stored on other networks");
       }
+
+      confirmation += this.tiered(contributions, RiskFactor.CONFIRM_SUCCESS_FROM_MULTI_TARGET_SOURCE, snapshot.foreignFailedTargets(),
+          MULTI_TARGET_SOURCE_TIERS,
+          new int[] {weights.CONFIRM_SUCCESS_FROM_MULTI_TARGET_SOURCE_6, weights.CONFIRM_SUCCESS_FROM_MULTI_TARGET_SOURCE_3},
+          "successful login from a source that recently failed against " + snapshot.foreignFailedTargets() + " other players' accounts");
     }
 
     int score = Math.min(volume, scoring.CAP_VOLUME)
@@ -146,20 +161,62 @@ public class RiskScorer {
         + Math.min(geo, scoring.CAP_GEO)
         + confirmation;
 
-    Severity severity;
-    if (score >= scoring.THRESHOLD_CRITICAL) {
-      severity = Severity.CRITICAL;
-    } else if (score >= scoring.THRESHOLD_HIGH) {
-      severity = Severity.HIGH;
-    } else if (score >= scoring.THRESHOLD_SUSPICIOUS) {
-      severity = Severity.SUSPICIOUS;
-    } else if (score >= scoring.THRESHOLD_INFO) {
-      severity = Severity.INFO;
-    } else {
-      severity = Severity.NONE;
+    return new RiskAssessment(score, this.severityOf(score, scoring), List.copyOf(contributions),
+        this.clusterKey(observation, contributions, confirmation > 0));
+  }
+
+  /**
+   * Assessment for a success that predates its source crossing a multi-target tier: the
+   * same factor, weights and thresholds as the live path, evaluated against the source's
+   * current foreign-failure spread. Returns {@code null} when the reached tier is
+   * disabled (weight 0), so a config that switches the factor off also silences the
+   * retroactive pass.
+   */
+  @Nullable
+  public RiskAssessment scoreRetroactiveMultiTargetSuccess(String lowercaseNickname, int foreignFailedTargets) {
+    Settings.PROTECTION.SCORING scoring = Settings.IMP.PROTECTION.SCORING;
+    Settings.PROTECTION.SCORING.WEIGHTS weights = scoring.WEIGHTS;
+
+    List<FactorContribution> contributions = new ArrayList<>();
+    int score = this.tiered(contributions, RiskFactor.CONFIRM_SUCCESS_FROM_MULTI_TARGET_SOURCE, foreignFailedTargets,
+        MULTI_TARGET_SOURCE_TIERS,
+        new int[] {weights.CONFIRM_SUCCESS_FROM_MULTI_TARGET_SOURCE_6, weights.CONFIRM_SUCCESS_FROM_MULTI_TARGET_SOURCE_3},
+        "the source of this earlier success went on to fail against " + foreignFailedTargets
+            + " other players' accounts (retroactive confirmation)");
+    if (score == 0) {
+      return null;
     }
 
-    return new RiskAssessment(score, severity, List.copyOf(contributions), this.clusterKey(observation, contributions, confirmation > 0));
+    return new RiskAssessment(score, this.severityOf(score, scoring), List.copyOf(contributions), "account:" + lowercaseNickname);
+  }
+
+  /**
+   * Did the foreign-failed-target count cross into a higher multi-target tier with this
+   * attempt? The retroactive pass triggers exactly on these transitions - once per tier
+   * per window-epoch - instead of rescanning on every attempt from a hot source.
+   */
+  public static boolean crossedMultiTargetTier(int before, int now) {
+    for (int tier : MULTI_TARGET_SOURCE_TIERS) {
+      if (before < tier && now >= tier) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  private Severity severityOf(int score, Settings.PROTECTION.SCORING scoring) {
+    if (score >= scoring.THRESHOLD_CRITICAL) {
+      return Severity.CRITICAL;
+    } else if (score >= scoring.THRESHOLD_HIGH) {
+      return Severity.HIGH;
+    } else if (score >= scoring.THRESHOLD_SUSPICIOUS) {
+      return Severity.SUSPICIOUS;
+    } else if (score >= scoring.THRESHOLD_INFO) {
+      return Severity.INFO;
+    } else {
+      return Severity.NONE;
+    }
   }
 
   /**

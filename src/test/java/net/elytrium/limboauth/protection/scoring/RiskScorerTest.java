@@ -19,6 +19,8 @@ package net.elytrium.limboauth.protection.scoring;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.net.InetAddress;
@@ -112,18 +114,83 @@ class RiskScorerTest {
   @Test
   void sprayedPasswordSuccessIsCritical() throws Exception {
     AttemptObservation observation = this.observation(AttemptOutcome.LOGIN_SUCCESS, true, 8000, false, "vanilla");
-    RiskAssessment assessment = this.scorer.score(observation, this.snapshot(0, 0, 0, 0, 0, 0, 0, 0, 0, 3, false), null, null);
+    RiskAssessment assessment = this.scorer.score(observation, this.snapshot(0, 0, 0, 0, 0, 0, 0, 0, 0, 3, false, 2, 0), null, null);
     assertTrue(assessment.hasFactor(RiskFactor.CONFIRM_SPRAYED_PASSWORD_SUCCESS));
     assertTrue(assessment.severity().atLeast(Severity.CRITICAL));
   }
 
   @Test
-  void failedSprayIsNotConfirmation() throws Exception {
-    AttemptObservation observation = this.observation(AttemptOutcome.LOGIN_FAIL, true, 8000, false, "vanilla");
-    RiskAssessment assessment = this.scorer.score(observation, this.snapshot(0, 0, 0, 0, 0, 0, 0, 0, 0, 5, false), null, null);
+  void sprayConfirmationIgnoresOwnAltFamilies() throws Exception {
+    // The dnecek shape: the password hit 3 distinct accounts, but every one of them is
+    // stored on the source's own subnet - zero foreign targets, so no confirmation.
+    AttemptObservation observation = this.observation(AttemptOutcome.LOGIN_SUCCESS, true, 8000, false, "vanilla");
+    RiskAssessment assessment = this.scorer.score(observation, this.snapshot(0, 0, 0, 0, 0, 0, 0, 0, 0, 3, false, 0, 0), null, null);
     assertTrue(assessment.hasFactor(RiskFactor.PASSWORD_SPRAY));
     assertFalse(assessment.hasFactor(RiskFactor.CONFIRM_SPRAYED_PASSWORD_SUCCESS));
     assertFalse(assessment.severity().atLeast(Severity.HIGH));
+  }
+
+  @Test
+  void failedSprayIsNotConfirmation() throws Exception {
+    AttemptObservation observation = this.observation(AttemptOutcome.LOGIN_FAIL, true, 8000, false, "vanilla");
+    RiskAssessment assessment = this.scorer.score(observation, this.snapshot(0, 0, 0, 0, 0, 0, 0, 0, 0, 5, false, 5, 0), null, null);
+    assertTrue(assessment.hasFactor(RiskFactor.PASSWORD_SPRAY));
+    assertFalse(assessment.hasFactor(RiskFactor.CONFIRM_SPRAYED_PASSWORD_SUCCESS));
+    assertFalse(assessment.severity().atLeast(Severity.HIGH));
+  }
+
+  @Test
+  void multiTargetSourceConfirmationTiersApply() throws Exception {
+    AttemptObservation success = this.observation(AttemptOutcome.LOGIN_SUCCESS, true, 8000, false, "vanilla");
+
+    RiskAssessment below = this.scorer.score(success, this.snapshot(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, false, 0, 2), null, null);
+    assertFalse(below.hasFactor(RiskFactor.CONFIRM_SUCCESS_FROM_MULTI_TARGET_SOURCE));
+
+    RiskAssessment high = this.scorer.score(success, this.snapshot(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, false, 0, 3), null, null);
+    assertTrue(high.hasFactor(RiskFactor.CONFIRM_SUCCESS_FROM_MULTI_TARGET_SOURCE));
+    assertEquals(50, high.score());
+    assertEquals(Severity.HIGH, high.severity());
+    assertEquals("account:target", high.clusterKey());
+
+    RiskAssessment critical = this.scorer.score(success, this.snapshot(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, false, 0, 6), null, null);
+    assertEquals(80, critical.score());
+    assertEquals(Severity.CRITICAL, critical.severity());
+  }
+
+  @Test
+  void multiTargetSourceConfirmationIsSuccessOnly() throws Exception {
+    // The failures themselves must stay on the volume/distribution path; only the
+    // moment of harm - a success from the multi-target source - confirms.
+    AttemptObservation fail = this.observation(AttemptOutcome.LOGIN_FAIL, true, 8000, false, "vanilla");
+    RiskAssessment assessment = this.scorer.score(fail, this.snapshot(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, false, 0, 6), null, null);
+    assertFalse(assessment.hasFactor(RiskFactor.CONFIRM_SUCCESS_FROM_MULTI_TARGET_SOURCE));
+  }
+
+  @Test
+  void retroactiveAssessmentMirrorsLiveTiersAndClusters() {
+    assertNull(this.scorer.scoreRetroactiveMultiTargetSuccess("finsterry", 2));
+
+    RiskAssessment high = this.scorer.scoreRetroactiveMultiTargetSuccess("finsterry", 3);
+    assertNotNull(high);
+    assertTrue(high.hasFactor(RiskFactor.CONFIRM_SUCCESS_FROM_MULTI_TARGET_SOURCE));
+    assertEquals(50, high.score());
+    assertEquals(Severity.HIGH, high.severity());
+    assertEquals("account:finsterry", high.clusterKey());
+
+    RiskAssessment critical = this.scorer.scoreRetroactiveMultiTargetSuccess("finsterry", 6);
+    assertNotNull(critical);
+    assertEquals(80, critical.score());
+    assertEquals(Severity.CRITICAL, critical.severity());
+  }
+
+  @Test
+  void multiTargetTierCrossingsFireExactlyOnTierBoundaries() {
+    assertFalse(RiskScorer.crossedMultiTargetTier(0, 2));
+    assertTrue(RiskScorer.crossedMultiTargetTier(2, 3));
+    assertFalse(RiskScorer.crossedMultiTargetTier(3, 5));
+    assertTrue(RiskScorer.crossedMultiTargetTier(5, 6));
+    assertTrue(RiskScorer.crossedMultiTargetTier(0, 6));
+    assertFalse(RiskScorer.crossedMultiTargetTier(6, 9));
   }
 
   @Test
@@ -204,9 +271,19 @@ class RiskScorerTest {
                                      int subnetDistinctFailedTargets, int subnetDistinctIps, int subnetChurnSessions,
                                      int accountDistinctFailIps, int accountFailsFromOtherIps,
                                      int fingerprintDistinctTargets, boolean sourceFlagged) {
+    return this.snapshot(ipFailures, ipDistinctFailedTargets, ipChurnSessions, ipDistinctNewSourceSuccesses,
+        subnetDistinctFailedTargets, subnetDistinctIps, subnetChurnSessions, accountDistinctFailIps, accountFailsFromOtherIps,
+        fingerprintDistinctTargets, sourceFlagged, 0, 0);
+  }
+
+  private AggregateSnapshot snapshot(int ipFailures, int ipDistinctFailedTargets, int ipChurnSessions, int ipDistinctNewSourceSuccesses,
+                                     int subnetDistinctFailedTargets, int subnetDistinctIps, int subnetChurnSessions,
+                                     int accountDistinctFailIps, int accountFailsFromOtherIps,
+                                     int fingerprintDistinctTargets, boolean sourceFlagged,
+                                     int foreignFingerprintTargets, int foreignFailedTargets) {
     return new AggregateSnapshot(ipFailures, ipDistinctFailedTargets, ipChurnSessions, ipDistinctNewSourceSuccesses,
         subnetDistinctFailedTargets, subnetDistinctIps, subnetChurnSessions, accountDistinctFailIps, accountFailsFromOtherIps,
-        fingerprintDistinctTargets, sourceFlagged);
+        fingerprintDistinctTargets, sourceFlagged, foreignFingerprintTargets, foreignFailedTargets);
   }
 
   private AttemptObservation observation(AttemptOutcome outcome, boolean accountExists, long millisSinceJoin,

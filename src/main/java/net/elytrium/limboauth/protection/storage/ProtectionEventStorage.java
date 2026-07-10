@@ -83,6 +83,23 @@ public class ProtectionEventStorage {
         .query();
   }
 
+  /**
+   * Newest-first events for one nickname, so an admin can see WHY an account was scored
+   * without grepping the server log. The nickname column is indexed.
+   */
+  public List<ProtectionEvent> recentForNickname(String lowercaseNickname, int limit) throws Exception {
+    Dao<ProtectionEvent, Long> currentDao = this.dao;
+    if (currentDao == null) {
+      return List.of();
+    }
+
+    return currentDao.queryBuilder()
+        .orderBy(ProtectionEvent.EVENT_TIME_FIELD, false)
+        .limit((long) limit)
+        .where().eq(ProtectionEvent.NICKNAME_FIELD, lowercaseNickname)
+        .query();
+  }
+
   public Map<String, Long> severityCountsSince(long sinceTime) throws Exception {
     Dao<ProtectionEvent, Long> currentDao = this.dao;
     Map<String, Long> counts = new LinkedHashMap<>();
