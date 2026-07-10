@@ -107,12 +107,16 @@ public class ActivityWindow {
   }
 
   /**
-   * Distinct FOREIGN accounts this password fingerprint was tried against. One owner
-   * reusing a password across their own alts stays at zero here, so the spray
-   * confirmation can tell an alt family from a genuine spray.
+   * Distinct FOREIGN accounts, OTHER than {@code excludeNickname}, that this password
+   * fingerprint was tried against. One owner reusing a password across their own alts
+   * stays at zero here, so the spray confirmation can tell an alt family from a genuine
+   * spray. The current attempt's own target is excluded because a success can never be
+   * evidence of itself having been sprayed - without the exclusion, a two-alt family
+   * relogged away from home would satisfy a threshold of 2 all by itself.
    */
-  public int distinctForeignFingerprintTargets(long since) {
+  public int distinctForeignFingerprintTargets(long since, String excludeNickname) {
     return this.distinctCount(since, event -> event.foreignTarget()
+        && !event.nickname().equals(excludeNickname)
         && (event.outcome() == AttemptOutcome.LOGIN_FAIL || event.outcome() == AttemptOutcome.LOGIN_SUCCESS), AttemptEvent::nickname);
   }
 

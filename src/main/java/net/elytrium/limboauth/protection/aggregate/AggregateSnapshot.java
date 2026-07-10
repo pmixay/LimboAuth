@@ -24,7 +24,9 @@ package net.elytrium.limboauth.protection.aggregate;
  *
  * <p>The two "foreign" counts only include targets whose stored LOGINIP sits on a
  * different subnet than the source of the attempt, so same-owner alt families
- * contribute nothing to them.
+ * contribute nothing to them. {@code foreignFingerprintTargets} additionally excludes
+ * the current attempt's own target: it answers "how many OTHER foreign accounts was
+ * this password tried against", which is what a spray confirmation may count.
  */
 public record AggregateSnapshot(
     int ipFailures,

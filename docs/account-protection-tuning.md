@@ -11,17 +11,33 @@ Implementation notes (deviations are refinements, not behavior changes):
   (now a class, not a record, to also carry the §3.4 "already alerted" marker);
   `AggregateSnapshot` gained `foreignFingerprintTargets` / `foreignFailedTargets`,
   appended at the end as specified.
-- §3.2: gated by `scoring.spray-foreign-target-min` (default 2). The base
-  `PASSWORD_SPRAY` tiers keep counting all targets (the optional part was skipped, as
-  suggested — 20 points is INFO-level noise and still a useful breadcrumb).
+- §3.2: gated by `scoring.spray-foreign-target-min` (default 2, 0 disables). The count
+  covers **other** foreign accounts — the successful login's own target is excluded,
+  because a hit can never be evidence of itself having been sprayed (otherwise a two-alt
+  family relogged away from home would satisfy 2 on its own). The base `PASSWORD_SPRAY`
+  tiers keep counting all targets (the optional part was skipped, as suggested — 20
+  points is INFO-level noise and still a useful breadcrumb).
 - §3.3: `CONFIRM_SUCCESS_FROM_MULTI_TARGET_SOURCE`, tiers ≥3 → 50 / ≥6 → 80 via
-  `confirm-success-from-multi-target-source-3/-6`.
+  `confirm-success-from-multi-target-source-3/-6`. The success itself must also be on a
+  **foreign** account, mirroring §3.4's retro rule: a checker's hit lands on somebody
+  else's account, while a neighbor logging into their own account behind a shared source
+  must never be confirmed by failures they did not produce.
 - §3.4: `RetroactiveElevation` triggers exactly on tier crossings (count sampled before
   and after each attempt is folded in), scans the source's existing ip window, and
-  marks reported successes on the shared event so a hit is alerted at most once.
+  marks reported successes on the shared event so a hit is alerted at most once. A
+  success is only "consumed" by an alert that actually reached confirmation severity
+  (HIGH+), so tuned-down weights or a live HIGH that carried no confirmation factor
+  leave it eligible for a later, louder crossing. Retro rows are stamped at detection
+  time (the original success age is in the factor detail) so `recent` sorts them on
+  top, and the source gets the same flagged/stats treatment as a live HIGH.
   Dispatch-only, as planned: retroactive alerts never enforce.
 - §4.3: `/limboauth protection inspect <nickname>` shows the stored events for one
   account with the full factor breakdown.
+
+Known limitation (accepted, low-FPR by design): an account whose row has **no stored
+LOGINIP** (legacy import; registration sets it, so this is rare) is never *foreign*, so
+it cannot contribute to — or be confirmed by — the foreign-target factors until its
+owner's next login writes the column. Unknown must never score against a player.
 
 This document describes concrete fixes and improvements the live data revealed.
 

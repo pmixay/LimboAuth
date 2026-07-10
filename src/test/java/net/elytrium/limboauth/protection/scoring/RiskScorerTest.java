@@ -141,7 +141,8 @@ class RiskScorerTest {
 
   @Test
   void multiTargetSourceConfirmationTiersApply() throws Exception {
-    AttemptObservation success = this.observation(AttemptOutcome.LOGIN_SUCCESS, true, 8000, false, "vanilla");
+    // The success itself is on a foreign account (stored login IP on another subnet).
+    AttemptObservation success = this.foreignSuccess();
 
     RiskAssessment below = this.scorer.score(success, this.snapshot(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, false, 0, 2), null, null);
     assertFalse(below.hasFactor(RiskFactor.CONFIRM_SUCCESS_FROM_MULTI_TARGET_SOURCE));
@@ -158,26 +159,40 @@ class RiskScorerTest {
   }
 
   @Test
+  void multiTargetSourceConfirmationRequiresForeignSuccess() throws Exception {
+    // A neighbor logging into their OWN account (stored on the source's subnet) must not
+    // be confirmed by foreign failures somebody else produced behind the same source.
+    AttemptObservation ownAccount = this.observation(AttemptOutcome.LOGIN_SUCCESS, true, 8000, false, "vanilla", "203.0.113.200");
+    RiskAssessment own = this.scorer.score(ownAccount, this.snapshot(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, false, 0, 6), null, null);
+    assertFalse(own.hasFactor(RiskFactor.CONFIRM_SUCCESS_FROM_MULTI_TARGET_SOURCE));
+
+    // No stored login IP at all (never logged in): unknown is not foreign either.
+    AttemptObservation unknown = this.observation(AttemptOutcome.LOGIN_SUCCESS, true, 8000, false, "vanilla");
+    RiskAssessment noStored = this.scorer.score(unknown, this.snapshot(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, false, 0, 6), null, null);
+    assertFalse(noStored.hasFactor(RiskFactor.CONFIRM_SUCCESS_FROM_MULTI_TARGET_SOURCE));
+  }
+
+  @Test
   void multiTargetSourceConfirmationIsSuccessOnly() throws Exception {
     // The failures themselves must stay on the volume/distribution path; only the
     // moment of harm - a success from the multi-target source - confirms.
-    AttemptObservation fail = this.observation(AttemptOutcome.LOGIN_FAIL, true, 8000, false, "vanilla");
+    AttemptObservation fail = this.observation(AttemptOutcome.LOGIN_FAIL, true, 8000, false, "vanilla", "198.51.100.44");
     RiskAssessment assessment = this.scorer.score(fail, this.snapshot(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, false, 0, 6), null, null);
     assertFalse(assessment.hasFactor(RiskFactor.CONFIRM_SUCCESS_FROM_MULTI_TARGET_SOURCE));
   }
 
   @Test
   void retroactiveAssessmentMirrorsLiveTiersAndClusters() {
-    assertNull(this.scorer.scoreRetroactiveMultiTargetSuccess("finsterry", 2));
+    assertNull(this.scorer.scoreRetroactiveMultiTargetSuccess("finsterry", 2, 600000L));
 
-    RiskAssessment high = this.scorer.scoreRetroactiveMultiTargetSuccess("finsterry", 3);
+    RiskAssessment high = this.scorer.scoreRetroactiveMultiTargetSuccess("finsterry", 3, 600000L);
     assertNotNull(high);
     assertTrue(high.hasFactor(RiskFactor.CONFIRM_SUCCESS_FROM_MULTI_TARGET_SOURCE));
     assertEquals(50, high.score());
     assertEquals(Severity.HIGH, high.severity());
     assertEquals("account:finsterry", high.clusterKey());
 
-    RiskAssessment critical = this.scorer.scoreRetroactiveMultiTargetSuccess("finsterry", 6);
+    RiskAssessment critical = this.scorer.scoreRetroactiveMultiTargetSuccess("finsterry", 6, 600000L);
     assertNotNull(critical);
     assertEquals(80, critical.score());
     assertEquals(Severity.CRITICAL, critical.severity());
@@ -288,13 +303,23 @@ class RiskScorerTest {
 
   private AttemptObservation observation(AttemptOutcome outcome, boolean accountExists, long millisSinceJoin,
                                          boolean firstAttempt, String brand) throws Exception {
-    AttemptObservation.Builder builder = AttemptObservation.builder("target", InetAddress.getByName("203.0.113.7"), outcome)
+    return this.observation(outcome, accountExists, millisSinceJoin, firstAttempt, brand, null);
+  }
+
+  private AttemptObservation observation(AttemptOutcome outcome, boolean accountExists, long millisSinceJoin,
+                                         boolean firstAttempt, String brand, String storedLoginIp) throws Exception {
+    return AttemptObservation.builder("target", InetAddress.getByName("203.0.113.7"), outcome)
         .accountExists(accountExists)
         .millisSinceJoin(millisSinceJoin)
         .firstAttemptOfSession(firstAttempt)
         .clientBrand(brand)
-        .fingerprint(42L);
-    return builder.build();
+        .storedLoginIp(storedLoginIp)
+        .fingerprint(42L)
+        .build();
+  }
+
+  private AttemptObservation foreignSuccess() throws Exception {
+    return this.observation(AttemptOutcome.LOGIN_SUCCESS, true, 8000, false, "vanilla", "198.51.100.44");
   }
 
   private AttemptObservation dormant(AttemptOutcome outcome, String storedIp, int storedDaysAgo) throws Exception {

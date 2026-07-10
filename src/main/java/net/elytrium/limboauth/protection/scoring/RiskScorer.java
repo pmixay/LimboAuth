@@ -140,19 +140,26 @@ public class RiskScorer {
             weights.CONFIRM_SUCCESS_FROM_FLAGGED_SOURCE, "successful login from a source flagged HIGH before this attempt");
       }
 
-      // Foreign targets only: one person reusing one password across their own alts
-      // (stored LOGINIP on the source's subnet) satisfies the raw distinct-target count
-      // but is not a spray, so the count that confirms must exclude the owner's accounts.
-      if (snapshot.foreignFingerprintTargets() >= Math.max(1, scoring.SPRAY_FOREIGN_TARGET_MIN)) {
+      // Foreign OTHER targets only: one person reusing one password across their own
+      // alts (stored LOGINIP on the source's subnet) satisfies the raw distinct-target
+      // count but is not a spray, and the hit itself is never evidence of the spray -
+      // the count that confirms covers other players' accounts. 0 disables.
+      int sprayForeignMin = scoring.SPRAY_FOREIGN_TARGET_MIN;
+      if (sprayForeignMin > 0 && snapshot.foreignFingerprintTargets() >= sprayForeignMin) {
         confirmation += this.add(contributions, RiskFactor.CONFIRM_SPRAYED_PASSWORD_SUCCESS,
             weights.CONFIRM_SPRAYED_PASSWORD_SUCCESS,
-            "the successful password was sprayed against " + snapshot.foreignFingerprintTargets() + " accounts stored on other networks");
+            "the successful password was sprayed against " + snapshot.foreignFingerprintTargets()
+                + " other accounts stored on other networks");
       }
 
-      confirmation += this.tiered(contributions, RiskFactor.CONFIRM_SUCCESS_FROM_MULTI_TARGET_SOURCE, snapshot.foreignFailedTargets(),
-          MULTI_TARGET_SOURCE_TIERS,
-          new int[] {weights.CONFIRM_SUCCESS_FROM_MULTI_TARGET_SOURCE_6, weights.CONFIRM_SUCCESS_FROM_MULTI_TARGET_SOURCE_3},
-          "successful login from a source that recently failed against " + snapshot.foreignFailedTargets() + " other players' accounts");
+      // The success must itself be on a foreign account, mirroring the retroactive pass:
+      // a checker's hit lands on somebody ELSE's account, while an innocent neighbor
+      // logging into their own account behind the same source must never be confirmed
+      // by failures they did not produce.
+      if (observation.isAccountExists() && SubnetKey.isForeign(observation.getStoredLoginIp(), observation.getSubnetKey())) {
+        confirmation += this.multiTargetSourceContribution(contributions, snapshot.foreignFailedTargets(),
+            "successful login from a source that recently failed against " + snapshot.foreignFailedTargets() + " other players' accounts");
+      }
     }
 
     int score = Math.min(volume, scoring.CAP_VOLUME)
@@ -173,21 +180,30 @@ public class RiskScorer {
    * retroactive pass.
    */
   @Nullable
-  public RiskAssessment scoreRetroactiveMultiTargetSuccess(String lowercaseNickname, int foreignFailedTargets) {
+  public RiskAssessment scoreRetroactiveMultiTargetSuccess(String lowercaseNickname, int foreignFailedTargets, long millisSinceSuccess) {
     Settings.PROTECTION.SCORING scoring = Settings.IMP.PROTECTION.SCORING;
-    Settings.PROTECTION.SCORING.WEIGHTS weights = scoring.WEIGHTS;
 
     List<FactorContribution> contributions = new ArrayList<>();
-    int score = this.tiered(contributions, RiskFactor.CONFIRM_SUCCESS_FROM_MULTI_TARGET_SOURCE, foreignFailedTargets,
-        MULTI_TARGET_SOURCE_TIERS,
-        new int[] {weights.CONFIRM_SUCCESS_FROM_MULTI_TARGET_SOURCE_6, weights.CONFIRM_SUCCESS_FROM_MULTI_TARGET_SOURCE_3},
-        "the source of this earlier success went on to fail against " + foreignFailedTargets
-            + " other players' accounts (retroactive confirmation)");
+    int score = this.multiTargetSourceContribution(contributions, foreignFailedTargets,
+        "successful login " + TimeUnit.MILLISECONDS.toMinutes(millisSinceSuccess) + " min earlier from a source that has since failed against "
+            + foreignFailedTargets + " other players' accounts (retroactive confirmation)");
     if (score == 0) {
       return null;
     }
 
     return new RiskAssessment(score, this.severityOf(score, scoring), List.copyOf(contributions), "account:" + lowercaseNickname);
+  }
+
+  /**
+   * The one place the multi-target tiers are paired with their weights, so the live
+   * confirmation and the retroactive pass can never drift apart.
+   */
+  private int multiTargetSourceContribution(List<FactorContribution> contributions, int foreignFailedTargets, String detail) {
+    Settings.PROTECTION.SCORING.WEIGHTS weights = Settings.IMP.PROTECTION.SCORING.WEIGHTS;
+    return this.tiered(contributions, RiskFactor.CONFIRM_SUCCESS_FROM_MULTI_TARGET_SOURCE, foreignFailedTargets,
+        MULTI_TARGET_SOURCE_TIERS,
+        new int[] {weights.CONFIRM_SUCCESS_FROM_MULTI_TARGET_SOURCE_6, weights.CONFIRM_SUCCESS_FROM_MULTI_TARGET_SOURCE_3},
+        detail);
   }
 
   /**
@@ -236,8 +252,7 @@ public class RiskScorer {
       return 0;
     }
 
-    String storedSubnet = SubnetKey.ofLiteral(observation.getStoredLoginIp());
-    if (storedSubnet == null || storedSubnet.equals(observation.getSubnetKey())) {
+    if (!SubnetKey.isForeign(observation.getStoredLoginIp(), observation.getSubnetKey())) {
       return 0;
     }
 

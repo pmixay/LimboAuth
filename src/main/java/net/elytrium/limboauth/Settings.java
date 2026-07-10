@@ -604,10 +604,12 @@ public class Settings extends YamlConfig {
       public int DORMANT_DAYS = 30;
 
       @Comment({
-          "Distinct FOREIGN accounts (existing accounts whose stored last-login IP is on another",
-          "subnet than the source) a password must have been tried against before a successful",
-          "login with it counts as a confirmed spray hit. Same-owner alt families relogged from",
-          "their usual network have zero foreign targets and can never trip the confirmation."
+          "Distinct OTHER foreign accounts (existing accounts, not the one that succeeded, whose",
+          "stored last-login IP is on another subnet than the source) a password must have been",
+          "tried against before a successful login with it counts as a confirmed spray hit.",
+          "Same-owner alt families relogged from their usual network have zero foreign targets",
+          "and can never trip the confirmation; accounts that never logged in (no stored IP)",
+          "are never counted as foreign. 0 disables the confirmation."
       })
       public int SPRAY_FOREIGN_TARGET_MIN = 2;
 
@@ -673,10 +675,11 @@ public class Settings extends YamlConfig {
         @Comment("Successful login with a password that was part of a spray against multiple foreign accounts (see spray-foreign-target-min)")
         public int CONFIRM_SPRAYED_PASSWORD_SUCCESS = 80;
         @Comment({
-            "Successful login from a source that recently FAILED against several other players'",
-            "accounts (foreign existing accounts) - the checker-with-a-hit pattern. Also used",
-            "retroactively: a success that happened BEFORE the source crossed a tier is",
-            "re-reported at this severity once it does."
+            "Successful login on a FOREIGN account (stored last-login IP on another subnet) from",
+            "a source that recently FAILED against several other players' foreign accounts - the",
+            "checker-with-a-hit pattern. A neighbor logging into their OWN account behind the same",
+            "source is never confirmed by failures they did not produce. Also used retroactively:",
+            "a success that happened BEFORE the source crossed a tier is re-reported once it does."
         })
         public int CONFIRM_SUCCESS_FROM_MULTI_TARGET_SOURCE_3 = 50;
         public int CONFIRM_SUCCESS_FROM_MULTI_TARGET_SOURCE_6 = 80;

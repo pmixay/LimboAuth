@@ -59,13 +59,8 @@ public class ProtectionAggregator {
         && !storedLoginIp.isEmpty()
         && !storedLoginIp.equals(observation.getIpString());
 
-    // Subnet-level (not exact-IP) so a returning player on a rotated dynamic address
-    // inside their usual ISP block is not counted foreign - the same comparison the
-    // DORMANT_ACCOUNT_TAKEOVER factor makes.
-    String storedSubnet = SubnetKey.ofLiteral(storedLoginIp);
     boolean foreignTarget = observation.isAccountExists()
-        && storedSubnet != null
-        && !storedSubnet.equals(observation.getSubnetKey());
+        && SubnetKey.isForeign(storedLoginIp, observation.getSubnetKey());
 
     ActivityWindow.AttemptEvent event = new ActivityWindow.AttemptEvent(
         observation.getTimestamp(),
@@ -97,7 +92,7 @@ public class ProtectionAggregator {
   public AggregateSnapshot snapshot(AttemptObservation observation) {
     long now = observation.getTimestamp();
     long volumeSince = now - Settings.IMP.PROTECTION.WINDOWS.VOLUME_WINDOW_MILLIS;
-    long distributionSince = now - Settings.IMP.PROTECTION.WINDOWS.DISTRIBUTION_WINDOW_MILLIS;
+    long distributionSince = distributionSince(now);
 
     ActivityWindow ipWindow = this.ipWindows.get(observation.getIpString());
     ActivityWindow subnetWindow = this.subnetWindows.get(observation.getSubnetKey());
@@ -119,7 +114,7 @@ public class ProtectionAggregator {
         accountWindow == null ? 0 : accountWindow.countFailsFromOtherIps(distributionSince, observation.getIpString()),
         fingerprintWindow == null ? 0 : fingerprintWindow.distinctFingerprintTargets(distributionSince),
         this.isFlagged(observation.getIpString(), now),
-        fingerprintWindow == null ? 0 : fingerprintWindow.distinctForeignFingerprintTargets(distributionSince),
+        fingerprintWindow == null ? 0 : fingerprintWindow.distinctForeignFingerprintTargets(distributionSince, observation.getLowercaseNickname()),
         ipWindow == null ? 0 : ipWindow.distinctForeignFailedTargets(distributionSince)
     );
   }
@@ -131,8 +126,7 @@ public class ProtectionAggregator {
    */
   public int foreignFailedTargets(AttemptObservation observation) {
     ActivityWindow ipWindow = this.ipWindows.get(observation.getIpString());
-    return ipWindow == null ? 0
-        : ipWindow.distinctForeignFailedTargets(observation.getTimestamp() - Settings.IMP.PROTECTION.WINDOWS.DISTRIBUTION_WINDOW_MILLIS);
+    return ipWindow == null ? 0 : ipWindow.distinctForeignFailedTargets(distributionSince(observation.getTimestamp()));
   }
 
   /**
@@ -141,8 +135,15 @@ public class ProtectionAggregator {
    */
   public List<ActivityWindow.AttemptEvent> unalertedForeignSuccesses(AttemptObservation observation) {
     ActivityWindow ipWindow = this.ipWindows.get(observation.getIpString());
-    return ipWindow == null ? List.of()
-        : ipWindow.unalertedForeignSuccesses(observation.getTimestamp() - Settings.IMP.PROTECTION.WINDOWS.DISTRIBUTION_WINDOW_MILLIS);
+    return ipWindow == null ? List.of() : ipWindow.unalertedForeignSuccesses(distributionSince(observation.getTimestamp()));
+  }
+
+  /**
+   * One horizon for the snapshot, the pre-update sample and the retroactive scan: the
+   * tier-crossing comparison is only sound while all three share it exactly.
+   */
+  private static long distributionSince(long now) {
+    return now - Settings.IMP.PROTECTION.WINDOWS.DISTRIBUTION_WINDOW_MILLIS;
   }
 
   public void markFlagged(String ip, long untilTime) {

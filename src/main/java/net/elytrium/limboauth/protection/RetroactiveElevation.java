@@ -61,20 +61,27 @@ public class RetroactiveElevation {
 
     List<ElevatedSuccess> elevated = new ArrayList<>();
     for (ActivityWindow.AttemptEvent event : this.aggregator.unalertedForeignSuccesses(observation)) {
-      RiskAssessment assessment = this.scorer.scoreRetroactiveMultiTargetSuccess(event.nickname(), foreignFailedNow);
-      if (assessment == null) {
-        // The reached tier is disabled by config; leave the events unmarked so a later
-        // reload that re-enables the factor can still pick them up.
+      RiskAssessment assessment =
+          this.scorer.scoreRetroactiveMultiTargetSuccess(event.nickname(), foreignFailedNow, observation.getTimestamp() - event.time());
+      if (assessment == null || !assessment.severity().atLeast(Severity.HIGH)) {
+        // Disabled or tuned-down weights (the score is the same for every candidate).
+        // Leave the events unmarked: only an actually-delivered confirmation may consume
+        // a success, so a later, higher crossing - or a reload that restores the
+        // weights - can still surface it.
         break;
       }
 
       event.markConfirmationAlerted();
-      // The candidate came from the source's own ip window, so its address IS the
-      // current observation's address - no parsing, no DNS.
+      // Stamped at DETECTION time, not the original success time: the triage surfaces
+      // (/limboauth protection recent, webhook batches) sort chronologically, and a
+      // backdated CRITICAL row would be buried under the attack's newer noise rows.
+      // The factor detail carries how much earlier the success itself happened. The
+      // candidate came from the source's own ip window, so its address IS the current
+      // observation's address - no parsing, no DNS.
       elevated.add(new ElevatedSuccess(
           AttemptObservation.builder(event.nickname(), observation.getIp(), AttemptOutcome.LOGIN_SUCCESS)
               .accountExists(true)
-              .timestamp(event.time())
+              .timestamp(observation.getTimestamp())
               .build(),
           assessment));
     }
@@ -84,9 +91,9 @@ public class RetroactiveElevation {
 
   /**
    * A past success re-scored at confirmation severity: a synthetic observation carrying
-   * the original nickname, source address and timestamp, ready for the ordinary
-   * dispatch path (log, PROTECTION_EVENTS row, Velocity event, webhook with the
-   * {@code account:<nick>} cluster cooldown).
+   * the original nickname and source address, stamped at detection time, ready for the
+   * ordinary dispatch path (log, PROTECTION_EVENTS row, Velocity event, webhook with
+   * the {@code account:<nick>} cluster cooldown).
    */
   public record ElevatedSuccess(AttemptObservation observation, RiskAssessment assessment) {
   }

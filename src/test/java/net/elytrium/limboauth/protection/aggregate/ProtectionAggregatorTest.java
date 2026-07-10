@@ -112,11 +112,13 @@ class ProtectionAggregatorTest {
     aggregator.update(last);
     AggregateSnapshot snapshot = aggregator.snapshot(last);
 
-    // The raw counts still see every existing account; the foreign ones only the two victims.
+    // The raw counts still see every existing account; the foreign fail count only the
+    // two victims, and the fingerprint count additionally excludes the current target
+    // (victim2) - it answers "how many OTHER foreign accounts got this password".
     assertEquals(4, snapshot.ipDistinctFailedTargets());
     assertEquals(4, snapshot.fingerprintDistinctTargets());
     assertEquals(2, snapshot.foreignFailedTargets());
-    assertEquals(2, snapshot.foreignFingerprintTargets());
+    assertEquals(1, snapshot.foreignFingerprintTargets());
   }
 
   @Test
@@ -137,8 +139,8 @@ class ProtectionAggregatorTest {
     long now = 1_000_000_000L;
     String ip = "203.0.113.7";
 
-    final ActivityWindow.AttemptEvent foreignHit = aggregator.update(this.storedSuccess("stolen", ip, now, "198.51.100.4"));
-    aggregator.update(this.storedSuccess("ownalt", ip, now + 1000, ip));
+    final ActivityWindow.AttemptEvent foreignHit = aggregator.update(this.success("stolen", ip, now, "198.51.100.4"));
+    aggregator.update(this.success("ownalt", ip, now + 1000, ip));
     AttemptObservation probe = this.storedFail("victim", ip, now + 2000, "198.51.100.9", true);
     aggregator.update(probe);
 
@@ -253,16 +255,6 @@ class ProtectionAggregatorTest {
   private AttemptObservation storedFail(String nickname, String ip, long time, String storedLoginIp, boolean accountExists) throws Exception {
     return AttemptObservation.builder(nickname, InetAddress.getByName(ip), AttemptOutcome.LOGIN_FAIL)
         .accountExists(accountExists)
-        .timestamp(time)
-        .millisSinceJoin(5000)
-        .storedLoginIp(storedLoginIp)
-        .fingerprint(777L)
-        .build();
-  }
-
-  private AttemptObservation storedSuccess(String nickname, String ip, long time, String storedLoginIp) throws Exception {
-    return AttemptObservation.builder(nickname, InetAddress.getByName(ip), AttemptOutcome.LOGIN_SUCCESS)
-        .accountExists(true)
         .timestamp(time)
         .millisSinceJoin(5000)
         .storedLoginIp(storedLoginIp)

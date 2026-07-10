@@ -17,9 +17,6 @@
 
 package net.elytrium.limboauth.protection;
 
-import com.google.gson.JsonElement;
-import com.google.gson.JsonObject;
-import com.google.gson.JsonParser;
 import com.velocitypowered.api.command.CommandSource;
 import com.velocitypowered.api.proxy.Player;
 import com.velocitypowered.api.scheduler.ScheduledTask;
@@ -49,6 +46,7 @@ import net.elytrium.limboauth.protection.alert.AlertDispatcher;
 import net.elytrium.limboauth.protection.alert.DiscordWebhookClient;
 import net.elytrium.limboauth.protection.geoip.GeoIpProvider;
 import net.elytrium.limboauth.protection.geoip.GeoIpResult;
+import net.elytrium.limboauth.protection.scoring.FactorContribution;
 import net.elytrium.limboauth.protection.scoring.RiskAssessment;
 import net.elytrium.limboauth.protection.scoring.RiskScorer;
 import net.elytrium.limboauth.protection.social.SocialLinkResolver;
@@ -243,8 +241,10 @@ public class ProtectionManager {
         this.aggregator.markFlagged(observation.getIpString(),
             observation.getTimestamp() + Settings.IMP.PROTECTION.WINDOWS.DISTRIBUTION_WINDOW_MILLIS);
 
-        if (observation.getOutcome() == AttemptOutcome.LOGIN_SUCCESS) {
-          // Already surfaced loudly right now - the retroactive pass must not repeat it.
+        if (observation.getOutcome() == AttemptOutcome.LOGIN_SUCCESS && assessment.hasConfirmationFactor()) {
+          // Reported as a probable hit right now - the retroactive pass must not repeat
+          // it. A HIGH that carried no confirmation factor (volume/geo/behavior only)
+          // stays eligible: the multi-target linkage would still be new information.
           windowEvent.markConfirmationAlerted();
         }
       }
@@ -263,8 +263,18 @@ public class ProtectionManager {
       // earlier quiet successes from it get their confirmation alert now. Deliberately
       // dispatch-only (log, event row, webhook) - enforcement stays tied to live attempts,
       // and the geo of the current attempt applies because the source IP is the same.
+      // The source itself gets the same flagged/stats treatment as any live >= HIGH
+      // assessment: a retro-confirmed checker must not look cleaner than a live one.
       for (RetroactiveElevation.ElevatedSuccess elevated
           : this.retroactiveElevation.onAttempt(observation, foreignFailedBefore, snapshot.foreignFailedTargets())) {
+        this.aggregator.markFlagged(observation.getIpString(),
+            observation.getTimestamp() + Settings.IMP.PROTECTION.WINDOWS.DISTRIBUTION_WINDOW_MILLIS);
+        synchronized (this.recentAssessments) {
+          this.recentAssessments.put(observation.getIpString(), new RecentAssessment(
+              observation.getIpString(), elevated.observation().getLowercaseNickname(),
+              elevated.assessment().score(), elevated.assessment().severity(), elevated.observation().getTimestamp()));
+        }
+
         this.alertDispatcher.dispatch(elevated.observation(), elevated.assessment(), geo);
       }
     } catch (Throwable t) {
@@ -557,31 +567,12 @@ public class ProtectionManager {
         source.sendMessage(Component.text("  [" + this.formatAgo(event.getEventTime()) + "] " + event.getSeverity()
             + " score " + event.getScore() + " from " + event.getIp() + " (" + event.getOutcome() + ")"
             + (event.getClientBrand() == null ? "" : " brand \"" + event.getClientBrand() + "\""), NamedTextColor.YELLOW));
-        for (String line : this.describeFactors(event.getFactors())) {
+        for (String line : FactorContribution.describeJson(event.getFactors())) {
           source.sendMessage(Component.text("    " + line, NamedTextColor.GRAY));
         }
       }
     } catch (Exception e) {
       source.sendMessage(Component.text("Failed to query stored events: " + e.getMessage(), NamedTextColor.RED));
-    }
-  }
-
-  private List<String> describeFactors(String factorsJson) {
-    if (factorsJson == null || factorsJson.isEmpty()) {
-      return List.of();
-    }
-
-    try {
-      List<String> lines = new ArrayList<>();
-      for (JsonElement element : JsonParser.parseString(factorsJson).getAsJsonArray()) {
-        JsonObject entry = element.getAsJsonObject();
-        lines.add(entry.get("f").getAsString() + " +" + entry.get("p").getAsInt() + " - " + entry.get("d").getAsString());
-      }
-
-      return lines;
-    } catch (RuntimeException e) {
-      // A row written by a future/older version may not parse; show it raw rather than nothing.
-      return List.of(factorsJson);
     }
   }
 

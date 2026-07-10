@@ -66,18 +66,22 @@ class RetroactiveElevationTest {
     harness.observe(this.foreignFail("pipka2282282", checkerIp, NOW + 10L * 60000, "192.0.2.11"));
     assertTrue(harness.elevated.isEmpty(), "two foreign failures are below the tier");
 
-    harness.observe(this.foreignFail("loool_000", checkerIp, NOW + 15L * 60000, "192.0.2.12"));
+    long crossingTime = NOW + 15L * 60000;
+    harness.observe(this.foreignFail("loool_000", checkerIp, crossingTime, "192.0.2.12"));
     assertEquals(1, harness.elevated.size(), "crossing the >=3 tier must surface the earlier hit");
 
     RetroactiveElevation.ElevatedSuccess elevated = harness.elevated.get(0);
     assertEquals("finsterry", elevated.observation().getLowercaseNickname());
     assertEquals(checkerIp, elevated.observation().getIpString());
-    assertEquals(hitTime, elevated.observation().getTimestamp(), "the alert carries the original success time");
+    assertEquals(crossingTime, elevated.observation().getTimestamp(),
+        "the alert is stamped at detection time so triage surfaces sort it on top; the detail carries the original success age");
     assertEquals(AttemptOutcome.LOGIN_SUCCESS, elevated.observation().getOutcome());
     assertTrue(elevated.assessment().hasFactor(RiskFactor.CONFIRM_SUCCESS_FROM_MULTI_TARGET_SOURCE));
     assertTrue(elevated.assessment().severity().atLeast(Severity.HIGH),
         "the retroactive confirmation must be HIGH, got " + elevated.assessment().severity());
     assertEquals("account:finsterry", elevated.assessment().clusterKey());
+    assertTrue(harness.aggregator.isFlagged(checkerIp, crossingTime + 1),
+        "a retro-confirmed source must be flagged like a live HIGH one");
 
     // More failures do not re-report the same hit: no boundary between the tiers...
     harness.observe(this.foreignFail("stray0", checkerIp, NOW + 20L * 60000, "192.0.2.13"));
@@ -162,6 +166,8 @@ class RetroactiveElevationTest {
 
   private static final class Harness {
 
+    private static final long DISTRIBUTION_WINDOW_MILLIS = 3600000;
+
     private final ProtectionAggregator aggregator = new ProtectionAggregator();
     private final RiskScorer scorer = new RiskScorer();
     private final RetroactiveElevation elevation = new RetroactiveElevation(this.aggregator, this.scorer);
@@ -172,11 +178,20 @@ class RetroactiveElevationTest {
       ActivityWindow.AttemptEvent windowEvent = this.aggregator.update(observation);
       AggregateSnapshot snapshot = this.aggregator.snapshot(observation);
       RiskAssessment assessment = this.scorer.score(observation, snapshot, null, null);
-      if (observation.getOutcome() == AttemptOutcome.LOGIN_SUCCESS && assessment.severity().atLeast(Severity.HIGH)) {
-        windowEvent.markConfirmationAlerted();
+      if (assessment.severity().atLeast(Severity.HIGH)) {
+        this.aggregator.markFlagged(observation.getIpString(), observation.getTimestamp() + DISTRIBUTION_WINDOW_MILLIS);
+        if (observation.getOutcome() == AttemptOutcome.LOGIN_SUCCESS && assessment.hasConfirmationFactor()) {
+          windowEvent.markConfirmationAlerted();
+        }
       }
 
-      this.elevated.addAll(this.elevation.onAttempt(observation, foreignFailedBefore, snapshot.foreignFailedTargets()));
+      List<RetroactiveElevation.ElevatedSuccess> newlyElevated =
+          this.elevation.onAttempt(observation, foreignFailedBefore, snapshot.foreignFailedTargets());
+      if (!newlyElevated.isEmpty()) {
+        this.aggregator.markFlagged(observation.getIpString(), observation.getTimestamp() + DISTRIBUTION_WINDOW_MILLIS);
+      }
+
+      this.elevated.addAll(newlyElevated);
       return assessment;
     }
   }

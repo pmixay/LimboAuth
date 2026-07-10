@@ -426,6 +426,49 @@ class DetectionScenarioTest {
   }
 
   /**
+   * FP guard for the spray confirmation away from home: two own alts sharing one
+   * password, both stored at the family's home subnet, relogged from a hotel network.
+   * Both targets are foreign now, but the hit itself may not count as its own spray
+   * evidence - one other foreign account is not a campaign.
+   */
+  @Test
+  void travelingAltFamilySharedPasswordStaysBelowHigh() throws Exception {
+    ProtectionAggregator aggregator = new ProtectionAggregator();
+    RiskScorer scorer = new RiskScorer();
+    long now = 1_700_000_000_000L;
+    String homeIp = "198.51.100.44";
+    long sharedPassword = 434343L;
+
+    Severity worst = Severity.NONE;
+    RiskAssessment last = null;
+    for (String alt : new String[] {"alt1", "alt2"}) {
+      AttemptObservation relog = AttemptObservation
+          .builder(alt, InetAddress.getByName("203.0.113.77"), AttemptOutcome.LOGIN_SUCCESS)
+          .accountExists(true)
+          .timestamp(now)
+          .millisSinceJoin(5000)
+          .firstAttemptOfSession(true)
+          .clientBrand("vanilla")
+          .storedLoginIp(homeIp)
+          .storedLoginDate(now - 2L * 86400000)
+          .fingerprint(sharedPassword)
+          .build();
+      aggregator.update(relog);
+      last = scorer.score(relog, aggregator.snapshot(relog), null, null);
+      if (last.severity().atLeast(worst)) {
+        worst = last.severity();
+      }
+
+      now += 240000;
+    }
+
+    assertFalse(last.hasFactor(RiskFactor.CONFIRM_SPRAYED_PASSWORD_SUCCESS),
+        "one other foreign alt must not confirm a spray");
+    assertFalse(worst.atLeast(Severity.HIGH),
+        "a traveling two-alt family must stay below HIGH, got " + worst);
+  }
+
+  /**
    * FN regression (production finding B, failures-first shape): a checker IP fails
    * against four other players' accounts and then logs into a fifth. Before the
    * multi-target-source confirmation the hit logged INFO 20 and cost the account;
