@@ -18,6 +18,7 @@
 package net.elytrium.limboauth;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -56,10 +57,21 @@ class SettingsUpgradeTest {
     assertEquals(15, Settings.IMP.PROTECTION.SCORING.WEIGHTS.MULTI_ACCOUNT_NEW_SOURCE_2);
     assertEquals(15, Settings.IMP.PROTECTION.SCORING.WEIGHTS.DORMANT_ACCOUNT_TAKEOVER);
 
+    // v2 enforcement ships present-but-off: one switch away, safe thresholds preconfigured.
+    assertFalse(Settings.IMP.PROTECTION.ENFORCEMENT.ENABLED);
+    assertEquals("HIGH", Settings.IMP.PROTECTION.ENFORCEMENT.KICK_ON);
+    assertEquals("HIGH", Settings.IMP.PROTECTION.ENFORCEMENT.BLOCK_SOURCE_ON);
+    assertEquals("HIGH", Settings.IMP.PROTECTION.ENFORCEMENT.SHIELD_ACCOUNT_ON);
+    assertEquals(30, Settings.IMP.PROTECTION.ENFORCEMENT.SOURCE_BLOCK_MINUTES);
+    assertEquals(60, Settings.IMP.PROTECTION.ENFORCEMENT.SHIELD_MINUTES);
+
     String written = Files.readString(configFile, StandardCharsets.UTF_8);
     assertTrue(written.contains("protection:"), "the protection section must be written back to disk");
     assertTrue(written.contains("geo-country-mismatch:"), "weights must be written back to disk");
     assertTrue(written.contains("dormant-days:"), "v1.1 keys must be written back to disk");
     assertTrue(written.contains("multi-account-new-source-2:"), "v1.1 weights must be written back to disk");
+    assertTrue(written.contains("kick-on:"), "enforcement keys must be written back to disk");
+    assertTrue(written.contains("shield-account-on:"), "enforcement keys must be written back to disk");
+    assertTrue(written.contains("protection-kick:"), "the protection kick message must be written back to disk");
   }
 }

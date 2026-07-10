@@ -424,6 +424,12 @@ public class Settings extends YamlConfig {
       public String LOGIN = "{PRFX} &aPlease, login using &6/login <password>&a, you have &6{0} &aattempts.";
       public String LOGIN_WRONG_PASSWORD = "{PRFX} &cYou''ve entered the wrong password, you have &6{0} &cattempts left.";
       public String LOGIN_WRONG_PASSWORD_KICK = "{PRFX}{NL}&cYou've entered the wrong password numerous times!";
+      @Comment({
+          "Kick screen used by the account protection enforcement (blocked source / kicked session).",
+          "Deliberately identical to the wrong-password kick by default, so password checkers",
+          "cannot tell that they were detected rather than simply wrong."
+      })
+      public String PROTECTION_KICK = "{PRFX}{NL}&cYou've entered the wrong password numerous times!";
       public String LOGIN_SUCCESSFUL = "{PRFX} &aSuccessfully logged in!";
       @Comment(value = "Can be empty.", at = Comment.At.SAME_LINE)
       public String LOGIN_TITLE = "&fPlease, login using &6/login <password>&a.";
@@ -530,15 +536,16 @@ public class Settings extends YamlConfig {
 
   @Comment({
       "Credential-stuffing / password-checker detection.",
-      "This version is MONITOR-ONLY: it scores every login attempt, logs, stores and alerts,",
-      "but NEVER kicks or locks anyone. Players with a linked social account",
-      "(LimboAuth-SocialAddon) are fully exempt from detection."
+      "MONITOR mode scores every login attempt, logs, stores and alerts, but never kicks or",
+      "locks anyone. ENFORCE mode additionally applies the actions from the enforcement",
+      "section when the score is high enough. Players with a linked social account",
+      "(LimboAuth-SocialAddon) are fully exempt from detection and enforcement."
   })
   public static class PROTECTION {
 
     public boolean ENABLED = true;
 
-    @Comment("MONITOR is the only mode implemented in this version. Enforcement is reserved for a future release.")
+    @Comment("MONITOR: detect and report only. ENFORCE: also apply the actions from the enforcement section.")
     public String MODE = "MONITOR";
 
     @Create
@@ -735,14 +742,37 @@ public class Settings extends YamlConfig {
     public ENFORCEMENT ENFORCEMENT;
 
     @Comment({
-        "RESERVED FOR A FUTURE RELEASE - currently ignored.",
-        "Designed so that enabling enforcement will be a config change, not a plugin update."
+        "Automatic enforcement, applied only when detection is confident. Active when this",
+        "section is enabled OR protection.mode is ENFORCE. All actions are temporary and",
+        "in-memory (cleared by a proxy restart); admins unlock early with",
+        "\"/limboauth protection unblock <ip|nickname>\". Players with the",
+        "\"limboauth.protection.bypass\" permission are never kicked or blocked."
     })
     public static class ENFORCEMENT {
 
+      @Comment("Master switch, equivalent to setting protection.mode: ENFORCE")
       public boolean ENABLED = false;
-      public String ACTION_HIGH = "NONE";
-      public String ACTION_CRITICAL = "NONE";
+      @Comment({
+          "Kick the offending session when an attempt scores this severity or above.",
+          "HIGH, CRITICAL or NONE (never). The kick screen is the generic protection-kick",
+          "message, indistinguishable from an ordinary wrong-password kick."
+      })
+      public String KICK_ON = "HIGH";
+      @Comment("Temporarily refuse all joins from the source IP at this severity or above: HIGH, CRITICAL or NONE")
+      public String BLOCK_SOURCE_ON = "HIGH";
+      public int SOURCE_BLOCK_MINUTES = 30;
+      @Comment({
+          "Shield the targeted account when a SUCCESSFUL login scores this severity or above:",
+          "HIGH, CRITICAL or NONE. While shielded, every password - even the correct one -",
+          "gets the ordinary wrong-password reply, so a checker can never confirm a hit.",
+          "The shield also applies to mod session-token logins. Linked-social accounts are",
+          "never shielded (they are exempt from the whole system)."
+      })
+      public String SHIELD_ACCOUNT_ON = "HIGH";
+      public int SHIELD_MINUTES = 60;
+      @Comment("Memory bounds; oldest entries are evicted above these caps")
+      public int MAX_BLOCKED_SOURCES = 10000;
+      public int MAX_SHIELDED_ACCOUNTS = 5000;
     }
   }
 
