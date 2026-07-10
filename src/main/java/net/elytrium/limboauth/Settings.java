@@ -364,6 +364,8 @@ public class Settings extends YamlConfig {
       public CommandPermissionState FORCE_UNREGISTER = CommandPermissionState.PERMISSION;
       @Comment("Permission: limboauth.admin.reload")
       public CommandPermissionState RELOAD = CommandPermissionState.PERMISSION;
+      @Comment("Permission: limboauth.admin.protection")
+      public CommandPermissionState PROTECTION = CommandPermissionState.PERMISSION;
       @Comment("Permission: limboauth.admin.help")
       public CommandPermissionState HELP = CommandPermissionState.TRUE;
     }
@@ -521,6 +523,212 @@ public class Settings extends YamlConfig {
     public String PASSWORD = "password";
     public String DATABASE = "limboauth";
     public String CONNECTION_PARAMETERS = "?autoReconnect=true&initialTimeout=1&useSSL=false";
+  }
+
+  @Create
+  public PROTECTION PROTECTION;
+
+  @Comment({
+      "Credential-stuffing / password-checker detection.",
+      "This version is MONITOR-ONLY: it scores every login attempt, logs, stores and alerts,",
+      "but NEVER kicks or locks anyone. Players with a linked social account",
+      "(LimboAuth-SocialAddon) are fully exempt from detection."
+  })
+  public static class PROTECTION {
+
+    public boolean ENABLED = true;
+
+    @Comment("MONITOR is the only mode implemented in this version. Enforcement is reserved for a future release.")
+    public String MODE = "MONITOR";
+
+    @Create
+    public WINDOWS WINDOWS;
+
+    public static class WINDOWS {
+
+      @Comment("Short window for single-source volume signals, milliseconds (10 minutes)")
+      public long VOLUME_WINDOW_MILLIS = 600000;
+      @Comment("Long window for distributed / low-and-slow signals, milliseconds (60 minutes)")
+      public long DISTRIBUTION_WINDOW_MILLIS = 3600000;
+      @Comment("Sessions shorter than this count as \"churn\" (join -> few attempts -> quit), milliseconds")
+      public long CHURN_SESSION_MILLIS = 20000;
+      @Comment("Sessions with at most this many password attempts can count as churn")
+      public int CHURN_MAX_ATTEMPTS = 3;
+      @Comment({
+          "Hard caps on tracked keys to bound memory under botnet-scale floods.",
+          "When a cap is reached, an arbitrary old entry is evicted to make room."
+      })
+      public int MAX_TRACKED_IPS = 50000;
+      public int MAX_TRACKED_SUBNETS = 20000;
+      public int MAX_TRACKED_ACCOUNTS = 50000;
+      public int MAX_TRACKED_FINGERPRINTS = 20000;
+      @Comment("Maximum events kept per tracked IP/subnet/account/password-fingerprint")
+      public int MAX_EVENTS_PER_WINDOW = 256;
+    }
+
+    @Create
+    public SCORING SCORING;
+
+    public static class SCORING {
+
+      @Comment("Severity thresholds on the additive risk score")
+      public int THRESHOLD_INFO = 15;
+      public int THRESHOLD_SUSPICIOUS = 30;
+      public int THRESHOLD_HIGH = 50;
+      public int THRESHOLD_CRITICAL = 75;
+
+      @Comment({
+          "Per-category score caps. No single non-confirmation category can reach the HIGH threshold",
+          "on its own, so a HIGH alert always requires at least two independent signal categories."
+      })
+      public int CAP_VOLUME = 35;
+      public int CAP_DISTRIBUTION = 35;
+      public int CAP_BEHAVIOR = 15;
+      public int CAP_GEO = 30;
+
+      @Comment("First login command sent within this time after spawning counts as \"instant\" (milliseconds)")
+      public long FAST_FIRST_COMMAND_MILLIS = 1000;
+
+      @Comment({
+          "Java regexes matched against the client brand. Empty by default to avoid false positives.",
+          "Example: [\"(?i).*console.*\", \"(?i)wurst.*\"]"
+      })
+      public List<String> SUSPICIOUS_BRANDS = List.of();
+
+      @Comment("Behavioral factors (brand, timing) are skipped for floodgate/bedrock players")
+      public boolean SKIP_BEHAVIOR_FOR_FLOODGATE = true;
+
+      @Create
+      public WEIGHTS WEIGHTS;
+
+      @Comment({
+          "Points each factor adds to the risk score. The numeric suffix is the trigger threshold",
+          "within the corresponding window (see the windows section). Set a weight to 0 to disable a factor."
+      })
+      public static class WEIGHTS {
+
+        @Comment("Failed logins from one IP in the volume window")
+        public int IP_FAIL_RATE_6 = 10;
+        public int IP_FAIL_RATE_10 = 15;
+        public int IP_FAIL_RATE_20 = 20;
+        @Comment("Distinct existing accounts with failed logins from one IP in the volume window")
+        public int IP_DISTINCT_TARGETS_3 = 10;
+        public int IP_DISTINCT_TARGETS_5 = 20;
+        public int IP_DISTINCT_TARGETS_10 = 30;
+        @Comment("Distinct existing accounts with failed logins from one subnet (needs >= 2 source IPs)")
+        public int SUBNET_DISTINCT_TARGETS_5 = 10;
+        public int SUBNET_DISTINCT_TARGETS_10 = 20;
+        @Comment("One account with failed logins from multiple IPs in the distribution window")
+        public int ACCOUNT_DISTINCT_IPS_2 = 15;
+        public int ACCOUNT_DISTINCT_IPS_4 = 25;
+        @Comment("The same password tried against multiple existing accounts in the distribution window")
+        public int PASSWORD_SPRAY_3 = 20;
+        public int PASSWORD_SPRAY_8 = 35;
+        @Comment("Short join -> few attempts -> quit sessions from one IP or subnet in the volume window")
+        public int CHURN_SESSIONS_3 = 15;
+        @Comment("First login command sent almost instantly after spawn")
+        public int INSTANT_FIRST_COMMAND = 5;
+        @Comment("Client never sent a brand plugin message before the attempt")
+        public int MISSING_BRAND = 5;
+        @Comment("Client brand matched one of the suspicious-brands regexes")
+        public int SUSPICIOUS_BRAND = 10;
+        @Comment("Login country differs from the country of the account's last successful login IP")
+        public int GEO_COUNTRY_MISMATCH = 20;
+        @Comment("Login IP belongs to a hosting/datacenter ASN")
+        public int GEO_HOSTING_ASN = 10;
+        @Comment("Successful login on an account that recently failed from OTHER IPs (probable confirmed hit)")
+        public int CONFIRM_SUCCESS_AFTER_DISTRIBUTED_FAILURES = 80;
+        @Comment("Successful login from a source that was already flagged HIGH before this attempt")
+        public int CONFIRM_SUCCESS_FROM_FLAGGED_SOURCE = 65;
+        @Comment("Successful login with a password that was part of a spray against multiple accounts")
+        public int CONFIRM_SPRAYED_PASSWORD_SUCCESS = 80;
+      }
+    }
+
+    @Create
+    public SOCIAL SOCIAL;
+
+    @Comment({
+        "Players with any linked social account (LimboAuth-SocialAddon) are fully exempt from detection.",
+        "The addon's table lives in the same database as LimboAuth. The table is auto-detected at startup;",
+        "if it is not found, all players are treated as unlinked (and therefore protected by detection)."
+    })
+    public static class SOCIAL {
+
+      public boolean ENABLED = true;
+      @Comment("Defaults match the stock LimboAuth-SocialAddon schema")
+      public String TABLE_NAME = "SOCIAL";
+      public String NICKNAME_COLUMN = "LOWERCASENICKNAME";
+      @Comment("A player is considered linked when ANY of these columns is non-empty")
+      public List<String> LINK_COLUMNS = List.of("VK_ID", "TELEGRAM_ID", "DISCORD_ID");
+      public long CACHE_TTL_MILLIS = 300000;
+    }
+
+    @Create
+    public STORAGE STORAGE;
+
+    @Comment("Detection events are stored in the PROTECTION_EVENTS table for threshold tuning")
+    public static class STORAGE {
+
+      @Comment("Minimum severity persisted to the database: INFO, SUSPICIOUS, HIGH or CRITICAL")
+      public String STORE_MIN_SEVERITY = "INFO";
+      public int RETENTION_DAYS = 14;
+    }
+
+    @Create
+    public WEBHOOK WEBHOOK;
+
+    @Comment("Discord webhook alerts")
+    public static class WEBHOOK {
+
+      public boolean ENABLED = false;
+      public String URL = "";
+      @Comment("Minimum severity that triggers a Discord message: INFO, SUSPICIOUS, HIGH or CRITICAL")
+      public String MIN_SEVERITY = "HIGH";
+      @Comment("Suppress repeat alerts for the same attack cluster unless severity escalates, milliseconds")
+      public long COOLDOWN_MILLIS = 300000;
+      @Comment("Alerts arriving within this interval are combined into one message, milliseconds")
+      public long BATCH_MILLIS = 10000;
+      @Comment("Optional role id to mention on CRITICAL alerts, e.g. \"123456789012345678\"")
+      public String MENTION_ROLE_CRITICAL = "";
+      public String USERNAME = "LimboAuth Protection";
+    }
+
+    @Create
+    public GEOIP GEOIP;
+
+    @Comment({
+        "Optional MaxMind GeoLite2 factors. Requires a free license key",
+        "(https://www.maxmind.com/en/geolite2/signup). Inactive while the key is empty.",
+        "The databases are downloaded into the plugin folder and refreshed automatically."
+    })
+    public static class GEOIP {
+
+      public boolean ENABLED = false;
+      public String LICENSE_KEY = "";
+      @Comment("COUNTRY is enough for the mismatch factor and is much smaller than CITY")
+      public String EDITION = "COUNTRY";
+      public boolean ENABLE_ASN = true;
+      public int REFRESH_DAYS = 7;
+      @Comment("ASNs always treated as hosting providers (AS numbers as strings)")
+      public List<String> HOSTING_ASNS = List.of();
+      @Comment("ASN organization name keywords treated as hosting providers (case-insensitive)")
+      public List<String> HOSTING_ORG_KEYWORDS = List.of("hosting", "datacenter", "data center", "vps", "cloud", "colo", "server");
+    }
+
+    @Create
+    public ENFORCEMENT ENFORCEMENT;
+
+    @Comment({
+        "RESERVED FOR A FUTURE RELEASE - currently ignored.",
+        "Designed so that enabling enforcement will be a config change, not a plugin update."
+    })
+    public static class ENFORCEMENT {
+
+      public boolean ENABLED = false;
+      public String ACTION_HIGH = "NONE";
+      public String ACTION_CRITICAL = "NONE";
+    }
   }
 
   public static class MD5KeySerializer extends ConfigSerializer<byte[], String> {
