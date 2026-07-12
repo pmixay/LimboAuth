@@ -159,7 +159,12 @@ public class ProtectionEventStorage {
         ++copied;
       }
 
-      TableUtils.dropTable(legacyDao, false);
+      // Not TableUtils.dropTable: it first emits bare "DROP INDEX <name>" statements,
+      // which MySQL/MariaDB reject (they need "... ON <table>"). A plain DROP TABLE
+      // removes the indexes together with the table on every supported engine.
+      StringBuilder dropTable = new StringBuilder("DROP TABLE ");
+      legacySource.getDatabaseType().appendEscapedEntityName(dropTable, legacyDao.getTableInfo().getTableName());
+      legacyDao.executeRawNoArgs(dropTable.toString());
       this.logger.info("Moved {} protection events from the auth database into the local store"
           + "{} and dropped the old PROTECTION_EVENTS table.", copied, skipped == 0 ? "" : " (" + skipped + " already present)");
     } catch (Exception e) {
