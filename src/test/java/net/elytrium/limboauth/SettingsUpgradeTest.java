@@ -62,6 +62,12 @@ class SettingsUpgradeTest {
     assertEquals(50, Settings.IMP.PROTECTION.SCORING.WEIGHTS.CONFIRM_SUCCESS_FROM_MULTI_TARGET_SOURCE_3);
     assertEquals(80, Settings.IMP.PROTECTION.SCORING.WEIGHTS.CONFIRM_SUCCESS_FROM_MULTI_TARGET_SOURCE_6);
 
+    // v2.2 balancing keys (scatter shortcut, foreign-fail spread, new-source cash-out tier).
+    assertEquals(2, Settings.IMP.PROTECTION.SCORING.SPRAY_SCATTER_SUBNET_MIN);
+    assertEquals(15, Settings.IMP.PROTECTION.SCORING.WEIGHTS.IP_FOREIGN_TARGET_SPREAD_3);
+    assertEquals(25, Settings.IMP.PROTECTION.SCORING.WEIGHTS.IP_FOREIGN_TARGET_SPREAD_5);
+    assertEquals(25, Settings.IMP.PROTECTION.SCORING.WEIGHTS.MULTI_ACCOUNT_NEW_SOURCE_4);
+
     // v2 enforcement ships present-but-off: one switch away, safe thresholds preconfigured.
     assertFalse(Settings.IMP.PROTECTION.ENFORCEMENT.ENABLED);
     assertEquals("HIGH", Settings.IMP.PROTECTION.ENFORCEMENT.KICK_ON);
@@ -78,6 +84,9 @@ class SettingsUpgradeTest {
     assertTrue(written.contains("spray-foreign-target-min:"), "v2.1 keys must be written back to disk");
     assertTrue(written.contains("confirm-success-from-multi-target-source-3:"), "v2.1 weights must be written back to disk");
     assertTrue(written.contains("confirm-success-from-multi-target-source-6:"), "v2.1 weights must be written back to disk");
+    assertTrue(written.contains("spray-scatter-subnet-min:"), "v2.2 keys must be written back to disk");
+    assertTrue(written.contains("ip-foreign-target-spread-3:"), "v2.2 weights must be written back to disk");
+    assertTrue(written.contains("multi-account-new-source-4:"), "v2.2 weights must be written back to disk");
     assertTrue(written.contains("kick-on:"), "enforcement keys must be written back to disk");
     assertTrue(written.contains("shield-account-on:"), "enforcement keys must be written back to disk");
     assertTrue(written.contains("protection-kick:"), "the protection kick message must be written back to disk");
@@ -137,10 +146,13 @@ class SettingsUpgradeTest {
       assertEquals(20, Settings.IMP.PROTECTION.SCORING.WEIGHTS.PASSWORD_SPRAY_3);
       assertEquals(80, Settings.IMP.PROTECTION.SCORING.WEIGHTS.CONFIRM_SUCCESS_AFTER_DISTRIBUTED_FAILURES);
       assertEquals(30, Settings.IMP.PROTECTION.ENFORCEMENT.SOURCE_BLOCK_MINUTES);
-      // The v2.1 foreign-target keys appear with their defaults.
+      // The v2.1/v2.2 foreign-target keys appear with their defaults.
       assertEquals(3, Settings.IMP.PROTECTION.SCORING.SPRAY_FOREIGN_TARGET_MIN);
       assertEquals(50, Settings.IMP.PROTECTION.SCORING.WEIGHTS.CONFIRM_SUCCESS_FROM_MULTI_TARGET_SOURCE_3);
       assertEquals(80, Settings.IMP.PROTECTION.SCORING.WEIGHTS.CONFIRM_SUCCESS_FROM_MULTI_TARGET_SOURCE_6);
+      assertEquals(2, Settings.IMP.PROTECTION.SCORING.SPRAY_SCATTER_SUBNET_MIN);
+      assertEquals(15, Settings.IMP.PROTECTION.SCORING.WEIGHTS.IP_FOREIGN_TARGET_SPREAD_3);
+      assertEquals(25, Settings.IMP.PROTECTION.SCORING.WEIGHTS.MULTI_ACCOUNT_NEW_SOURCE_4);
 
       String written = Files.readString(configFile, StandardCharsets.UTF_8);
       assertTrue(written.contains("spray-foreign-target-min: 3"), "the v2.1 scoring key must be appended with its default");

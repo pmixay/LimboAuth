@@ -119,6 +119,9 @@ class ProtectionAggregatorTest {
     assertEquals(4, snapshot.fingerprintDistinctTargets());
     assertEquals(2, snapshot.foreignFailedTargets());
     assertEquals(1, snapshot.foreignFingerprintTargets());
+    // victim1 and victim2 are stored on the same /24 and victim2 (the current target)
+    // is excluded, so exactly one other stored subnet remains.
+    assertEquals(1, snapshot.foreignFingerprintSubnets());
   }
 
   @Test

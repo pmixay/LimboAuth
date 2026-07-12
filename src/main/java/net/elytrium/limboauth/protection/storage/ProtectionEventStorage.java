@@ -23,16 +23,29 @@ import com.j256.ormlite.dao.GenericRawResults;
 import com.j256.ormlite.stmt.DeleteBuilder;
 import com.j256.ormlite.support.ConnectionSource;
 import com.j256.ormlite.table.TableUtils;
+import java.nio.file.Path;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.Consumer;
+import net.elytrium.limboauth.dependencies.DatabaseLibrary;
+import org.checkerframework.checker.nullness.qual.Nullable;
 import org.slf4j.Logger;
 
+/**
+ * PROTECTION_EVENTS storage in a plugin-local H2 database, deliberately separate from
+ * the auth database: detection telemetry stays out of the (possibly shared, possibly
+ * remote) main DB, and its writes never compete with auth queries. Rows an older
+ * version stored in the auth database are migrated over once and the old table is
+ * dropped there.
+ */
 public class ProtectionEventStorage {
 
   private final Logger logger;
 
+  private volatile ConnectionSource localSource;
   private volatile Dao<ProtectionEvent, Long> dao;
 
   public ProtectionEventStorage(Logger logger) {
@@ -40,22 +53,92 @@ public class ProtectionEventStorage {
   }
 
   /**
-   * (Re)binds the storage to the current connection source. Follows the same
-   * table-creation pattern as the AUTH table, including the CREATE INDEX guard
-   * and the automatic column migration for future upgrades.
+   * Local connection source for the event store: an H2 file next to the plugin config
+   * ({@code protection-events-v2.mv.db}), whatever engine the auth database uses.
    */
-  public void init(ConnectionSource connectionSource, Consumer<Dao<?, ?>> migrator) throws Exception {
+  public static ConnectionSource openLocal(Path dataDirectory) throws Exception {
+    return DatabaseLibrary.H2.connectToORM("jdbc:h2:" + dataDirectory.toAbsolutePath().resolve("protection-events-v2"), null, null);
+  }
+
+  /**
+   * (Re)binds the storage to a local connection source (closing the previous one) and,
+   * when the auth database still holds a PROTECTION_EVENTS table from an older version,
+   * migrates its rows into the local store and drops the old table. Table creation
+   * follows the same pattern as the AUTH table, including the CREATE INDEX guard and
+   * the automatic column migration for future upgrades.
+   */
+  public void init(ConnectionSource local, @Nullable ConnectionSource legacySource, Consumer<Dao<?, ?>> migrator) throws Exception {
+    this.close();
+
     try {
-      TableUtils.createTableIfNotExists(connectionSource, ProtectionEvent.class);
+      TableUtils.createTableIfNotExists(local, ProtectionEvent.class);
     } catch (Exception e) {
       if (e.getMessage() == null || !e.getMessage().contains("CREATE INDEX")) {
         throw e;
       }
     }
 
-    Dao<ProtectionEvent, Long> createdDao = DaoManager.createDao(connectionSource, ProtectionEvent.class);
+    Dao<ProtectionEvent, Long> createdDao = DaoManager.createDao(local, ProtectionEvent.class);
     migrator.accept(createdDao);
+    this.localSource = local;
     this.dao = createdDao;
+
+    if (legacySource != null) {
+      this.migrateLegacyRows(createdDao, legacySource);
+    }
+  }
+
+  public void close() {
+    ConnectionSource current = this.localSource;
+    this.localSource = null;
+    this.dao = null;
+    if (current != null) {
+      current.closeQuietly();
+    }
+  }
+
+  /**
+   * One-way move of rows an older version stored in the auth database. Idempotent:
+   * rows already present locally (same event time + nickname, e.g. after a crash
+   * between copy and drop) are not duplicated, and the old table is only dropped after
+   * the copy completed. A failure leaves the auth database untouched and is retried on
+   * the next start.
+   */
+  private void migrateLegacyRows(Dao<ProtectionEvent, Long> localDao, ConnectionSource legacySource) {
+    try {
+      Dao<ProtectionEvent, Long> legacyDao = DaoManager.createDao(legacySource, ProtectionEvent.class);
+      if (!legacyDao.isTableExists()) {
+        return;
+      }
+
+      Set<String> present = new HashSet<>();
+      for (ProtectionEvent event : localDao.queryBuilder()
+          .selectColumns(ProtectionEvent.EVENT_TIME_FIELD, ProtectionEvent.NICKNAME_FIELD).query()) {
+        present.add(event.getEventTime() + ":" + event.getNickname());
+      }
+
+      long copied = 0;
+      long skipped = 0;
+      for (ProtectionEvent event : legacyDao.queryForAll()) {
+        if (present.contains(event.getEventTime() + ":" + event.getNickname())) {
+          ++skipped;
+          continue;
+        }
+
+        // Rebuilt without the generated ID so the local store assigns its own.
+        localDao.create(new ProtectionEvent(event.getEventTime(), event.getSeverity(), event.getScore(), event.getNickname(),
+            event.getIp(), event.getSubnet(), event.getOutcome(), event.getFactors(), event.getClientBrand(),
+            event.getCountry(), event.getAsn()));
+        ++copied;
+      }
+
+      TableUtils.dropTable(legacyDao, false);
+      this.logger.info("Moved {} protection events from the auth database into the local store"
+          + "{} and dropped the old PROTECTION_EVENTS table.", copied, skipped == 0 ? "" : " (" + skipped + " already present)");
+    } catch (Exception e) {
+      this.logger.warn("Failed to migrate protection events out of the auth database; "
+          + "the old table is left in place and the migration will be retried on the next start.", e);
+    }
   }
 
   public void store(ProtectionEvent event) {

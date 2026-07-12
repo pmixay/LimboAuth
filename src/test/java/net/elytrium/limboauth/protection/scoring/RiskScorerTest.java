@@ -158,15 +158,43 @@ class RiskScorerTest {
     RiskAssessment below = this.scorer.score(success, this.snapshot(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, false, 0, 2), null, null);
     assertFalse(below.hasFactor(RiskFactor.CONFIRM_SUCCESS_FROM_MULTI_TARGET_SOURCE));
 
+    // Confirmation 50 + the foreign-fail-spread distribution factor 15.
     RiskAssessment high = this.scorer.score(success, this.snapshot(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, false, 0, 3), null, null);
     assertTrue(high.hasFactor(RiskFactor.CONFIRM_SUCCESS_FROM_MULTI_TARGET_SOURCE));
-    assertEquals(50, high.score());
+    assertTrue(high.hasFactor(RiskFactor.IP_FOREIGN_TARGET_SPREAD));
+    assertEquals(65, high.score());
     assertEquals(Severity.HIGH, high.severity());
     assertEquals("account:target", high.clusterKey());
 
+    // Confirmation 80 + spread 25.
     RiskAssessment critical = this.scorer.score(success, this.snapshot(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, false, 0, 6), null, null);
-    assertEquals(80, critical.score());
+    assertEquals(105, critical.score());
     assertEquals(Severity.CRITICAL, critical.severity());
+  }
+
+  @Test
+  void foreignFailSpreadTiersApply() throws Exception {
+    // A distribution factor on any outcome: failures against other players' accounts.
+    AttemptObservation fail = this.observation(AttemptOutcome.LOGIN_FAIL, true, 8000, false, "vanilla");
+    assertFalse(this.scorer.score(fail, this.snapshot(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, false, 0, 2), null, null)
+        .hasFactor(RiskFactor.IP_FOREIGN_TARGET_SPREAD));
+    assertEquals(15, this.scorer.score(fail, this.snapshot(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, false, 0, 3), null, null).score());
+    assertEquals(25, this.scorer.score(fail, this.snapshot(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, false, 0, 5), null, null).score());
+  }
+
+  @Test
+  void scatteredSprayConfirmsBelowTheCountThreshold() throws Exception {
+    // Two other foreign targets are not enough by count (min 3), but their stored
+    // subnets are scattered across two unrelated networks - strangers, not a family.
+    AttemptObservation success = this.observation(AttemptOutcome.LOGIN_SUCCESS, true, 8000, false, "vanilla");
+    RiskAssessment scattered = this.scorer.score(success, this.snapshot(0, 0, 0, 0, 0, 0, 0, 0, 0, 3, false, 2, 0, 2), null, null);
+    assertTrue(scattered.hasFactor(RiskFactor.CONFIRM_SPRAYED_PASSWORD_SUCCESS));
+    assertTrue(scattered.severity().atLeast(Severity.CRITICAL));
+
+    // The same two targets on ONE stored subnet: an alt family, no confirmation.
+    RiskAssessment family = this.scorer.score(success, this.snapshot(0, 0, 0, 0, 0, 0, 0, 0, 0, 3, false, 2, 0, 1), null, null);
+    assertFalse(family.hasFactor(RiskFactor.CONFIRM_SPRAYED_PASSWORD_SUCCESS));
+    assertFalse(family.severity().atLeast(Severity.HIGH));
   }
 
   @Test
@@ -250,6 +278,10 @@ class RiskScorerTest {
     // 15 points: on its own this stays an INFO breadcrumb, never an alert-worthy severity.
     assertEquals(15, multiple.score());
     assertFalse(multiple.severity().atLeast(Severity.SUSPICIOUS));
+
+    // Four accounts cashed out from one IP is larger than any observed alt family.
+    RiskAssessment cashOut = this.scorer.score(observation, this.snapshot(0, 0, 0, 4, 0, 0, 0, 0, 0, 0, false), null, null);
+    assertEquals(25, cashOut.score());
   }
 
   @Test
@@ -307,9 +339,19 @@ class RiskScorerTest {
                                      int accountDistinctFailIps, int accountFailsFromOtherIps,
                                      int fingerprintDistinctTargets, boolean sourceFlagged,
                                      int foreignFingerprintTargets, int foreignFailedTargets) {
+    return this.snapshot(ipFailures, ipDistinctFailedTargets, ipChurnSessions, ipDistinctNewSourceSuccesses,
+        subnetDistinctFailedTargets, subnetDistinctIps, subnetChurnSessions, accountDistinctFailIps, accountFailsFromOtherIps,
+        fingerprintDistinctTargets, sourceFlagged, foreignFingerprintTargets, foreignFailedTargets, 0);
+  }
+
+  private AggregateSnapshot snapshot(int ipFailures, int ipDistinctFailedTargets, int ipChurnSessions, int ipDistinctNewSourceSuccesses,
+                                     int subnetDistinctFailedTargets, int subnetDistinctIps, int subnetChurnSessions,
+                                     int accountDistinctFailIps, int accountFailsFromOtherIps,
+                                     int fingerprintDistinctTargets, boolean sourceFlagged,
+                                     int foreignFingerprintTargets, int foreignFailedTargets, int foreignFingerprintSubnets) {
     return new AggregateSnapshot(ipFailures, ipDistinctFailedTargets, ipChurnSessions, ipDistinctNewSourceSuccesses,
         subnetDistinctFailedTargets, subnetDistinctIps, subnetChurnSessions, accountDistinctFailIps, accountFailsFromOtherIps,
-        fingerprintDistinctTargets, sourceFlagged, foreignFingerprintTargets, foreignFailedTargets);
+        fingerprintDistinctTargets, sourceFlagged, foreignFingerprintTargets, foreignFailedTargets, foreignFingerprintSubnets);
   }
 
   private AttemptObservation observation(AttemptOutcome outcome, boolean accountExists, long millisSinceJoin,

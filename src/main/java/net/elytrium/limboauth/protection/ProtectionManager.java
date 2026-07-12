@@ -136,9 +136,12 @@ public class ProtectionManager {
 
     if (this.enabled) {
       try {
-        this.storage.init(this.plugin.getConnectionSource(), this.plugin::migrateDb);
+        // Events live in a plugin-local H2 store; rows an older version left in the
+        // auth database are migrated over once and the old table is dropped there.
+        this.storage.init(ProtectionEventStorage.openLocal(this.plugin.getDataDirectory()),
+            this.plugin.getConnectionSource(), this.plugin::migrateDb);
       } catch (Exception e) {
-        throw new SQLRuntimeException("Failed to initialize the PROTECTION_EVENTS table.", e);
+        throw new SQLRuntimeException("Failed to initialize the local protection events database.", e);
       }
 
       this.socialResolver.reload(this.plugin.getPlayerDao());
@@ -161,6 +164,7 @@ public class ProtectionManager {
       }
     } else {
       this.geoIpProvider.close();
+      this.storage.close();
     }
 
     this.rescheduleTasks();
@@ -180,6 +184,7 @@ public class ProtectionManager {
 
     this.webhookClient.drain();
     this.geoIpProvider.close();
+    this.storage.close();
   }
 
   public boolean isEnabled() {

@@ -49,7 +49,14 @@ public final class SubnetKey {
    * is NOT foreign: unknown must never score against a player.
    */
   public static boolean isForeign(@Nullable String storedAddress, String subnetKey) {
-    String storedSubnet = ofLiteral(storedAddress);
+    return isForeignSubnet(ofLiteral(storedAddress), subnetKey);
+  }
+
+  /**
+   * Same predicate for a stored subnet that the caller already parsed with
+   * {@link #ofLiteral} (the aggregator keeps the parsed subnet on the window event).
+   */
+  public static boolean isForeignSubnet(@Nullable String storedSubnet, String subnetKey) {
     return storedSubnet != null && !storedSubnet.equals(subnetKey);
   }
 

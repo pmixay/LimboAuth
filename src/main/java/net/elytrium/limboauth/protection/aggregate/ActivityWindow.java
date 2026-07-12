@@ -121,6 +121,18 @@ public class ActivityWindow {
   }
 
   /**
+   * Distinct STORED subnets among the other foreign accounts this password fingerprint
+   * was tried against: an alt family's accounts live on their owner's network(s), while
+   * a real spray's victims are strangers scattered across unrelated networks. Foreign
+   * targets always carry a parsed stored subnet.
+   */
+  public int distinctForeignFingerprintTargetSubnets(long since, String excludeNickname) {
+    return this.distinctCount(since, event -> event.foreignTarget()
+        && !event.nickname().equals(excludeNickname)
+        && (event.outcome() == AttemptOutcome.LOGIN_FAIL || event.outcome() == AttemptOutcome.LOGIN_SUCCESS), AttemptEvent::storedSubnet);
+  }
+
+  /**
    * Distinct FOREIGN existing accounts that had a failed login in this window: the
    * "this source keeps failing against accounts that are not its own" signal of a
    * credential-stuffing run, which shared-IP households cannot produce.
@@ -197,10 +209,11 @@ public class ActivityWindow {
     private final boolean churn;
     private final boolean newSource;
     private final boolean foreignTarget;
+    private final String storedSubnet;
     private boolean confirmationAlerted;
 
     public AttemptEvent(long time, String nickname, boolean accountExists, String ip, AttemptOutcome outcome, boolean churn,
-                        boolean newSource, boolean foreignTarget) {
+                        boolean newSource, boolean foreignTarget, String storedSubnet) {
       this.time = time;
       this.nickname = nickname;
       this.accountExists = accountExists;
@@ -209,6 +222,7 @@ public class ActivityWindow {
       this.churn = churn;
       this.newSource = newSource;
       this.foreignTarget = foreignTarget;
+      this.storedSubnet = storedSubnet;
     }
 
     public long time() {
@@ -241,6 +255,14 @@ public class ActivityWindow {
 
     public boolean foreignTarget() {
       return this.foreignTarget;
+    }
+
+    /**
+     * Parsed subnet of the target account's stored LOGINIP, or {@code null} when absent
+     * or unparsable. Always non-null when {@link #foreignTarget()} is true.
+     */
+    public String storedSubnet() {
+      return this.storedSubnet;
     }
 
     /**

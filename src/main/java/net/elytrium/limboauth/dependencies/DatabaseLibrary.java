@@ -137,19 +137,7 @@ public enum DatabaseLibrary {
   public ConnectionSource connectToORM(Path dir, String hostname, String database, String user, String password)
       throws ReflectiveOperationException, IOException, SQLException, URISyntaxException {
     if (this.driver.getOriginal() == null) {
-      IsolatedClassLoader classLoader = new IsolatedClassLoader(new URL[] {this.baseLibrary.getClassLoaderURL()});
-      Class<?> driverClass = classLoader.loadClass(
-          switch (this) {
-            case H2_LEGACY_V1, H2 -> "org.h2.Driver";
-            case MYSQL -> "com.mysql.cj.jdbc.NonRegisteringDriver";
-            case MARIADB -> "org.mariadb.jdbc.Driver";
-            case POSTGRESQL -> "org.postgresql.Driver";
-            case SQLITE -> "org.sqlite.JDBC";
-          }
-      );
-
-      this.driver.setOriginal((Driver) driverClass.getConstructor().newInstance());
-      DriverManager.registerDriver(this.driver);
+      IsolatedClassLoader classLoader = this.initDriver();
 
       // Run the connector once so its one-time work (e.g. the H2 v1 -> v2 migration) is executed.
       // connectToORM used to do this before it was switched to IsolatedDriver, and without it the
@@ -157,7 +145,42 @@ public enum DatabaseLibrary {
       this.connect(classLoader, dir, this.stringGetter.getJdbcString(dir, hostname, database), user, password).close();
     }
 
-    String jdbc = this.stringGetter.getJdbcString(dir, hostname, database);
+    return this.pooledSource(this.stringGetter.getJdbcString(dir, hostname, database), user, password);
+  }
+
+  /**
+   * Connection source for an explicit JDBC url, for auxiliary plugin-local databases
+   * (e.g. the protection event store). Deliberately SKIPS the engine's one-time
+   * main-database work - the H2 v1 -&gt; v2 dump/restore must only ever target the main
+   * database file, never an auxiliary one.
+   */
+  public ConnectionSource connectToORM(String jdbc, String user, String password)
+      throws ReflectiveOperationException, IOException, SQLException, URISyntaxException {
+    if (this.driver.getOriginal() == null) {
+      this.initDriver();
+    }
+
+    return this.pooledSource(jdbc, user, password);
+  }
+
+  private IsolatedClassLoader initDriver() throws ReflectiveOperationException, IOException, SQLException, URISyntaxException {
+    IsolatedClassLoader classLoader = new IsolatedClassLoader(new URL[] {this.baseLibrary.getClassLoaderURL()});
+    Class<?> driverClass = classLoader.loadClass(
+        switch (this) {
+          case H2_LEGACY_V1, H2 -> "org.h2.Driver";
+          case MYSQL -> "com.mysql.cj.jdbc.NonRegisteringDriver";
+          case MARIADB -> "org.mariadb.jdbc.Driver";
+          case POSTGRESQL -> "org.postgresql.Driver";
+          case SQLITE -> "org.sqlite.JDBC";
+        }
+    );
+
+    this.driver.setOriginal((Driver) driverClass.getConstructor().newInstance());
+    DriverManager.registerDriver(this.driver);
+    return classLoader;
+  }
+
+  private ConnectionSource pooledSource(String jdbc, String user, String password) throws SQLException {
     boolean h2 = this.baseLibrary == BaseLibrary.H2_V1 || this.baseLibrary == BaseLibrary.H2_V2;
     return new JdbcPooledConnectionSource(this.driver.getInitializer() + jdbc,
         h2 ? null : user, h2 ? null : password, DatabaseTypeUtils.createDatabaseType(jdbc));

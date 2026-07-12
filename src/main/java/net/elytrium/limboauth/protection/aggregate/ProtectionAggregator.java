@@ -59,8 +59,9 @@ public class ProtectionAggregator {
         && !storedLoginIp.isEmpty()
         && !storedLoginIp.equals(observation.getIpString());
 
+    String storedSubnet = SubnetKey.ofLiteral(storedLoginIp);
     boolean foreignTarget = observation.isAccountExists()
-        && SubnetKey.isForeign(storedLoginIp, observation.getSubnetKey());
+        && SubnetKey.isForeignSubnet(storedSubnet, observation.getSubnetKey());
 
     ActivityWindow.AttemptEvent event = new ActivityWindow.AttemptEvent(
         observation.getTimestamp(),
@@ -70,7 +71,8 @@ public class ProtectionAggregator {
         observation.getOutcome(),
         churn,
         newSource,
-        foreignTarget
+        foreignTarget,
+        storedSubnet
     );
 
     this.windowFor(this.ipWindows, observation.getIpString(), windows.MAX_TRACKED_IPS).add(event, maxEvents);
@@ -115,7 +117,8 @@ public class ProtectionAggregator {
         fingerprintWindow == null ? 0 : fingerprintWindow.distinctFingerprintTargets(distributionSince),
         this.isFlagged(observation.getIpString(), now),
         fingerprintWindow == null ? 0 : fingerprintWindow.distinctForeignFingerprintTargets(distributionSince, observation.getLowercaseNickname()),
-        ipWindow == null ? 0 : ipWindow.distinctForeignFailedTargets(distributionSince)
+        ipWindow == null ? 0 : ipWindow.distinctForeignFailedTargets(distributionSince),
+        fingerprintWindow == null ? 0 : fingerprintWindow.distinctForeignFingerprintTargetSubnets(distributionSince, observation.getLowercaseNickname())
     );
   }
 

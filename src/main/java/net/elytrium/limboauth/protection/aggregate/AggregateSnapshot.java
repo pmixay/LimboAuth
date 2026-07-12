@@ -22,11 +22,13 @@ package net.elytrium.limboauth.protection.aggregate;
  * that attempt was folded into the sliding windows. New components are appended
  * at the end - the constructor is positional and tests wire it by position.
  *
- * <p>The two "foreign" counts only include targets whose stored LOGINIP sits on a
+ * <p>The "foreign" counts only include targets whose stored LOGINIP sits on a
  * different subnet than the source of the attempt, so same-owner alt families
  * contribute nothing to them. {@code foreignFingerprintTargets} additionally excludes
  * the current attempt's own target: it answers "how many OTHER foreign accounts was
  * this password tried against", which is what a spray confirmation may count.
+ * {@code foreignFingerprintSubnets} counts the distinct STORED subnets behind those
+ * other targets - one for an alt family, several for a real spray's scattered victims.
  */
 public record AggregateSnapshot(
     int ipFailures,
@@ -41,5 +43,6 @@ public record AggregateSnapshot(
     int fingerprintDistinctTargets,
     boolean sourceFlagged,
     int foreignFingerprintTargets,
-    int foreignFailedTargets) {
+    int foreignFailedTargets,
+    int foreignFingerprintSubnets) {
 }
