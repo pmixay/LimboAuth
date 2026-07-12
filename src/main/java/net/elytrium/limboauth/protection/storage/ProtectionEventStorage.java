@@ -20,16 +20,18 @@ package net.elytrium.limboauth.protection.storage;
 import com.j256.ormlite.dao.Dao;
 import com.j256.ormlite.dao.DaoManager;
 import com.j256.ormlite.dao.GenericRawResults;
+import com.j256.ormlite.field.FieldType;
 import com.j256.ormlite.stmt.DeleteBuilder;
 import com.j256.ormlite.support.ConnectionSource;
 import com.j256.ormlite.table.TableUtils;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.function.Consumer;
 import net.elytrium.limboauth.dependencies.DatabaseLibrary;
 import org.checkerframework.checker.nullness.qual.Nullable;
 import org.slf4j.Logger;
@@ -65,9 +67,12 @@ public class ProtectionEventStorage {
    * when the auth database still holds a PROTECTION_EVENTS table from an older version,
    * migrates its rows into the local store and drops the old table. Table creation
    * follows the same pattern as the AUTH table, including the CREATE INDEX guard and
-   * the automatic column migration for future upgrades.
+   * an automatic column migration for future upgrades - a local, H2-specific one:
+   * LimboAuth#migrateDb discovers existing columns with SQL chosen by the MAIN
+   * database's engine and therefore must never be pointed at this store (doing so is
+   * what once made a MySQL-main server re-add every column on boot).
    */
-  public void init(ConnectionSource local, @Nullable ConnectionSource legacySource, Consumer<Dao<?, ?>> migrator) throws Exception {
+  public void init(ConnectionSource local, @Nullable ConnectionSource legacySource) throws Exception {
     this.close();
 
     try {
@@ -79,12 +84,34 @@ public class ProtectionEventStorage {
     }
 
     Dao<ProtectionEvent, Long> createdDao = DaoManager.createDao(local, ProtectionEvent.class);
-    migrator.accept(createdDao);
+    this.migrateColumns(createdDao);
     this.localSource = local;
     this.dao = createdDao;
 
     if (legacySource != null) {
       this.migrateLegacyRows(createdDao, legacySource);
+    }
+  }
+
+  /**
+   * Adds columns a future version introduces to an existing local table. The discovery
+   * query is H2's - the local store is H2 by construction, whatever engine the auth
+   * database runs on.
+   */
+  private void migrateColumns(Dao<ProtectionEvent, Long> localDao) throws Exception {
+    Set<FieldType> missing = new HashSet<>();
+    Collections.addAll(missing, localDao.getTableInfo().getFieldTypes());
+    try (GenericRawResults<String[]> columns = localDao.queryRaw(
+        "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'PROTECTION_EVENTS'")) {
+      columns.forEach(row -> missing.removeIf(field -> field.getColumnName().equalsIgnoreCase(row[0])));
+    }
+
+    for (FieldType field : missing) {
+      StringBuilder builder = new StringBuilder("ALTER TABLE PROTECTION_EVENTS ADD ");
+      List<String> dummy = new ArrayList<>();
+      localDao.getConnectionSource().getDatabaseType().appendColumnArg(field.getTableName(), builder, field, dummy, dummy, dummy, dummy);
+      localDao.executeRawNoArgs(builder.toString());
+      this.logger.info("Added the {} column to the local protection events store.", field.getColumnName());
     }
   }
 

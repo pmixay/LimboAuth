@@ -51,7 +51,7 @@ class ProtectionEventStorageTest {
 
   @Test
   void storesAndQueriesInTheLocalStore() throws Exception {
-    this.storage.init(this.memorySource("local"), null, dao -> { });
+    this.storage.init(this.memorySource("local"), null);
 
     this.storage.store(this.event(1000, "finsterry", "HIGH"));
     this.storage.store(this.event(2000, "microsoft", "CRITICAL"));
@@ -76,7 +76,7 @@ class ProtectionEventStorageTest {
     authDao.create(this.event(1000, "finsterry", "HIGH"));
     authDao.create(this.event(2000, "microsoft", "CRITICAL"));
 
-    this.storage.init(this.memorySource("local"), authSource, dao -> { });
+    this.storage.init(this.memorySource("local"), authSource);
 
     List<ProtectionEvent> recent = this.storage.recent(10);
     assertEquals(2, recent.size());
@@ -89,7 +89,7 @@ class ProtectionEventStorageTest {
     // First bind: no legacy table at all - nothing to migrate, nothing to fail on.
     ConnectionSource local = this.memorySource("local");
     ConnectionSource authSource = this.memorySource("auth");
-    this.storage.init(local, authSource, dao -> { });
+    this.storage.init(local, authSource);
     this.storage.store(this.event(1000, "finsterry", "HIGH"));
 
     // A crash-between-copy-and-drop shape: the auth database still has one row that
@@ -99,12 +99,42 @@ class ProtectionEventStorageTest {
     authDao.create(this.event(2000, "microsoft", "CRITICAL"));
 
     // Rebind (same in-memory local database through a fresh source, like a reload).
-    this.storage.init(this.memorySource("local"), authSource, dao -> { });
+    this.storage.init(this.memorySource("local"), authSource);
 
     List<ProtectionEvent> recent = this.storage.recent(10);
     assertEquals(2, recent.size(), "the duplicate row must not be copied twice");
     assertTrue(recent.stream().anyMatch(event -> event.getNickname().equals("microsoft")));
     assertFalse(authDao.isTableExists());
+  }
+
+  /**
+   * The production boot crash: binding to a local database whose table already has
+   * every column must be a no-op, not an attempt to re-add existing columns. (The old
+   * wiring borrowed LimboAuth#migrateDb, whose column discovery is keyed to the MAIN
+   * database engine and finds nothing on H2 when the main engine is MySQL.)
+   */
+  @Test
+  void rebindingToAnExistingCompleteTableDoesNotReAddColumns() throws Exception {
+    this.storage.init(this.memorySource("local"), null);
+    this.storage.store(this.event(1000, "finsterry", "HIGH"));
+
+    this.storage.init(this.memorySource("local"), null);
+
+    assertEquals(1, this.storage.recent(10).size(), "the rebind must reuse the intact table");
+  }
+
+  @Test
+  void missingColumnIsAddedOnUpgrade() throws Exception {
+    // An older-schema table: a future version added the ASN column.
+    ConnectionSource local = this.memorySource("local");
+    Dao<ProtectionEvent, Long> dao = DaoManager.createDao(local, ProtectionEvent.class);
+    TableUtils.createTableIfNotExists(local, ProtectionEvent.class);
+    dao.executeRawNoArgs("ALTER TABLE PROTECTION_EVENTS DROP COLUMN " + ProtectionEvent.ASN_FIELD);
+
+    this.storage.init(this.memorySource("local"), null);
+    this.storage.store(this.event(1000, "finsterry", "HIGH"));
+
+    assertEquals(1, this.storage.recent(10).size(), "the store must work after the column was re-added");
   }
 
   /**

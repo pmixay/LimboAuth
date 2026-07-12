@@ -138,8 +138,9 @@ public class ProtectionManager {
       try {
         // Events live in a plugin-local H2 store; rows an older version left in the
         // auth database are migrated over once and the old table is dropped there.
-        this.storage.init(ProtectionEventStorage.openLocal(this.plugin.getDataDirectory()),
-            this.plugin.getConnectionSource(), this.plugin::migrateDb);
+        // The storage runs its own H2 column migration - LimboAuth#migrateDb keys its
+        // column discovery to the MAIN database engine and must not touch this store.
+        this.storage.init(ProtectionEventStorage.openLocal(this.plugin.getDataDirectory()), this.plugin.getConnectionSource());
       } catch (Exception e) {
         throw new SQLRuntimeException("Failed to initialize the local protection events database.", e);
       }
