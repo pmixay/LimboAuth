@@ -58,7 +58,7 @@ class SettingsUpgradeTest {
     assertEquals(15, Settings.IMP.PROTECTION.SCORING.WEIGHTS.DORMANT_ACCOUNT_TAKEOVER);
 
     // v2.1 foreign-target tuning keys (spray FP fix + multi-target-source confirmation).
-    assertEquals(2, Settings.IMP.PROTECTION.SCORING.SPRAY_FOREIGN_TARGET_MIN);
+    assertEquals(3, Settings.IMP.PROTECTION.SCORING.SPRAY_FOREIGN_TARGET_MIN);
     assertEquals(50, Settings.IMP.PROTECTION.SCORING.WEIGHTS.CONFIRM_SUCCESS_FROM_MULTI_TARGET_SOURCE_3);
     assertEquals(80, Settings.IMP.PROTECTION.SCORING.WEIGHTS.CONFIRM_SUCCESS_FROM_MULTI_TARGET_SOURCE_6);
 
@@ -138,12 +138,12 @@ class SettingsUpgradeTest {
       assertEquals(80, Settings.IMP.PROTECTION.SCORING.WEIGHTS.CONFIRM_SUCCESS_AFTER_DISTRIBUTED_FAILURES);
       assertEquals(30, Settings.IMP.PROTECTION.ENFORCEMENT.SOURCE_BLOCK_MINUTES);
       // The v2.1 foreign-target keys appear with their defaults.
-      assertEquals(2, Settings.IMP.PROTECTION.SCORING.SPRAY_FOREIGN_TARGET_MIN);
+      assertEquals(3, Settings.IMP.PROTECTION.SCORING.SPRAY_FOREIGN_TARGET_MIN);
       assertEquals(50, Settings.IMP.PROTECTION.SCORING.WEIGHTS.CONFIRM_SUCCESS_FROM_MULTI_TARGET_SOURCE_3);
       assertEquals(80, Settings.IMP.PROTECTION.SCORING.WEIGHTS.CONFIRM_SUCCESS_FROM_MULTI_TARGET_SOURCE_6);
 
       String written = Files.readString(configFile, StandardCharsets.UTF_8);
-      assertTrue(written.contains("spray-foreign-target-min: 2"), "the v2.1 scoring key must be appended with its default");
+      assertTrue(written.contains("spray-foreign-target-min: 3"), "the v2.1 scoring key must be appended with its default");
       assertTrue(written.contains("confirm-success-from-multi-target-source-3: 50"), "the v2.1 weights must be appended with their defaults");
       assertTrue(written.contains("confirm-success-from-multi-target-source-6: 80"), "the v2.1 weights must be appended with their defaults");
       assertTrue(written.contains("confirm-sprayed-password-success: 90"), "customized weights must be preserved on disk");
@@ -197,7 +197,7 @@ class SettingsUpgradeTest {
       assertEquals("HIGH", Settings.IMP.PROTECTION.ENFORCEMENT.KICK_ON);
       assertEquals("HIGH", Settings.IMP.PROTECTION.ENFORCEMENT.SHIELD_ACCOUNT_ON);
       assertEquals(60, Settings.IMP.PROTECTION.ENFORCEMENT.SHIELD_MINUTES);
-      assertEquals(2, Settings.IMP.PROTECTION.SCORING.SPRAY_FOREIGN_TARGET_MIN);
+      assertEquals(3, Settings.IMP.PROTECTION.SCORING.SPRAY_FOREIGN_TARGET_MIN);
       assertEquals(50, Settings.IMP.PROTECTION.SCORING.WEIGHTS.CONFIRM_SUCCESS_FROM_MULTI_TARGET_SOURCE_3);
       assertEquals(80, Settings.IMP.PROTECTION.SCORING.WEIGHTS.CONFIRM_SUCCESS_FROM_MULTI_TARGET_SOURCE_6);
 

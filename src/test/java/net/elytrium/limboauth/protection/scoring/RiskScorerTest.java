@@ -114,9 +114,20 @@ class RiskScorerTest {
   @Test
   void sprayedPasswordSuccessIsCritical() throws Exception {
     AttemptObservation observation = this.observation(AttemptOutcome.LOGIN_SUCCESS, true, 8000, false, "vanilla");
-    RiskAssessment assessment = this.scorer.score(observation, this.snapshot(0, 0, 0, 0, 0, 0, 0, 0, 0, 3, false, 2, 0), null, null);
+    RiskAssessment assessment = this.scorer.score(observation, this.snapshot(0, 0, 0, 0, 0, 0, 0, 0, 0, 4, false, 3, 0), null, null);
     assertTrue(assessment.hasFactor(RiskFactor.CONFIRM_SPRAYED_PASSWORD_SUCCESS));
     assertTrue(assessment.severity().atLeast(Severity.CRITICAL));
+  }
+
+  @Test
+  void sprayConfirmationNeedsThreeOtherForeignTargets() throws Exception {
+    // Production-fitted default: a three-alt family relogged from a new subnet produces
+    // exactly 2 other foreign targets and must stay unconfirmed; the third OTHER
+    // account is what separates a campaign from a family.
+    AttemptObservation observation = this.observation(AttemptOutcome.LOGIN_SUCCESS, true, 8000, false, "vanilla");
+    RiskAssessment family = this.scorer.score(observation, this.snapshot(0, 0, 0, 0, 0, 0, 0, 0, 0, 3, false, 2, 0), null, null);
+    assertFalse(family.hasFactor(RiskFactor.CONFIRM_SPRAYED_PASSWORD_SUCCESS));
+    assertFalse(family.severity().atLeast(Severity.HIGH));
   }
 
   @Test

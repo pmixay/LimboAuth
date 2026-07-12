@@ -609,9 +609,13 @@ public class Settings extends YamlConfig {
           "tried against before a successful login with it counts as a confirmed spray hit.",
           "Same-owner alt families relogged from their usual network have zero foreign targets",
           "and can never trip the confirmation; accounts that never logged in (no stored IP)",
-          "are never counted as foreign. 0 disables the confirmation."
+          "are never counted as foreign. 0 disables the confirmation.",
+          "Default 3: monitor data showed real three-alt families relogged from a rotated or",
+          "new subnet (all stored login IPs elsewhere), which a threshold of 2 flags CRITICAL.",
+          "At 3 such a family peaks at SUSPICIOUS while a spray that reached three or more",
+          "OTHER players' accounts still confirms."
       })
-      public int SPRAY_FOREIGN_TARGET_MIN = 2;
+      public int SPRAY_FOREIGN_TARGET_MIN = 3;
 
       @Comment({
           "Java regexes matched against the client brand. Empty by default to avoid false positives.",

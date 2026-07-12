@@ -426,10 +426,11 @@ class DetectionScenarioTest {
   }
 
   /**
-   * FP guard for the spray confirmation away from home: two own alts sharing one
-   * password, both stored at the family's home subnet, relogged from a hotel network.
-   * Both targets are foreign now, but the hit itself may not count as its own spray
-   * evidence - one other foreign account is not a campaign.
+   * FP regression (production, the smertyypvp family): THREE own alts sharing one
+   * password, all stored at the family's previous subnet, relogged back-to-back from a
+   * new address. Every target is foreign, so only the other-target count separates this
+   * from a spray: with the production-fitted minimum of 3 other foreign accounts, a
+   * three-alt family peaks at SUSPICIOUS instead of the CRITICAL 115 observed live.
    */
   @Test
   void travelingAltFamilySharedPasswordStaysBelowHigh() throws Exception {
@@ -441,7 +442,7 @@ class DetectionScenarioTest {
 
     Severity worst = Severity.NONE;
     RiskAssessment last = null;
-    for (String alt : new String[] {"alt1", "alt2"}) {
+    for (String alt : new String[] {"alt1", "alt2", "alt3"}) {
       AttemptObservation relog = AttemptObservation
           .builder(alt, InetAddress.getByName("203.0.113.77"), AttemptOutcome.LOGIN_SUCCESS)
           .accountExists(true)
@@ -463,9 +464,9 @@ class DetectionScenarioTest {
     }
 
     assertFalse(last.hasFactor(RiskFactor.CONFIRM_SPRAYED_PASSWORD_SUCCESS),
-        "one other foreign alt must not confirm a spray");
+        "two other foreign alts must not confirm a spray");
     assertFalse(worst.atLeast(Severity.HIGH),
-        "a traveling two-alt family must stay below HIGH, got " + worst);
+        "a traveling three-alt family must stay below HIGH, got " + worst);
   }
 
   /**
