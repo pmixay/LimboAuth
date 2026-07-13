@@ -39,12 +39,14 @@ import net.elytrium.limboauth.protection.action.ActionPolicy;
 import net.elytrium.limboauth.protection.action.EnforceActionPolicy;
 import net.elytrium.limboauth.protection.action.EnforcementState;
 import net.elytrium.limboauth.protection.action.MonitorActionPolicy;
+import net.elytrium.limboauth.protection.aggregate.ActivityWindow;
 import net.elytrium.limboauth.protection.aggregate.AggregateSnapshot;
 import net.elytrium.limboauth.protection.aggregate.ProtectionAggregator;
 import net.elytrium.limboauth.protection.alert.AlertDispatcher;
 import net.elytrium.limboauth.protection.alert.DiscordWebhookClient;
 import net.elytrium.limboauth.protection.geoip.GeoIpProvider;
 import net.elytrium.limboauth.protection.geoip.GeoIpResult;
+import net.elytrium.limboauth.protection.scoring.FactorContribution;
 import net.elytrium.limboauth.protection.scoring.RiskAssessment;
 import net.elytrium.limboauth.protection.scoring.RiskScorer;
 import net.elytrium.limboauth.protection.social.SocialLinkResolver;
@@ -80,6 +82,7 @@ public class ProtectionManager {
   private final PasswordFingerprinter fingerprinter = new PasswordFingerprinter();
   private final ProtectionAggregator aggregator = new ProtectionAggregator();
   private final RiskScorer scorer = new RiskScorer();
+  private final RetroactiveElevation retroactiveElevation = new RetroactiveElevation(this.aggregator, this.scorer);
   private final EnforcementState enforcementState = new EnforcementState(System::currentTimeMillis);
   private final ActionPolicy monitorPolicy = new MonitorActionPolicy();
   private final ActionPolicy enforcePolicy;
@@ -133,9 +136,13 @@ public class ProtectionManager {
 
     if (this.enabled) {
       try {
-        this.storage.init(this.plugin.getConnectionSource(), this.plugin::migrateDb);
+        // Events live in a plugin-local H2 store; rows an older version left in the
+        // auth database are migrated over once and the old table is dropped there.
+        // The storage runs its own H2 column migration - LimboAuth#migrateDb keys its
+        // column discovery to the MAIN database engine and must not touch this store.
+        this.storage.init(ProtectionEventStorage.openLocal(this.plugin.getDataDirectory()), this.plugin.getConnectionSource());
       } catch (Exception e) {
-        throw new SQLRuntimeException("Failed to initialize the PROTECTION_EVENTS table.", e);
+        throw new SQLRuntimeException("Failed to initialize the local protection events database.", e);
       }
 
       this.socialResolver.reload(this.plugin.getPlayerDao());
@@ -158,6 +165,7 @@ public class ProtectionManager {
       }
     } else {
       this.geoIpProvider.close();
+      this.storage.close();
     }
 
     this.rescheduleTasks();
@@ -177,6 +185,7 @@ public class ProtectionManager {
 
     this.webhookClient.drain();
     this.geoIpProvider.close();
+    this.storage.close();
   }
 
   public boolean isEnabled() {
@@ -223,7 +232,9 @@ public class ProtectionManager {
         return;
       }
 
-      this.aggregator.update(observation);
+      // Sampled ahead of the fold-in so the retroactive pass can detect a tier crossing.
+      final int foreignFailedBefore = this.aggregator.foreignFailedTargets(observation);
+      ActivityWindow.AttemptEvent windowEvent = this.aggregator.update(observation);
       AggregateSnapshot snapshot = this.aggregator.snapshot(observation);
 
       GeoIpResult geo = this.geoIpProvider.lookup(observation.getIp());
@@ -235,6 +246,13 @@ public class ProtectionManager {
         // Flag the source so a later successful login from it is treated as a probable hit.
         this.aggregator.markFlagged(observation.getIpString(),
             observation.getTimestamp() + Settings.IMP.PROTECTION.WINDOWS.DISTRIBUTION_WINDOW_MILLIS);
+
+        if (observation.getOutcome() == AttemptOutcome.LOGIN_SUCCESS && assessment.hasConfirmationFactor()) {
+          // Reported as a probable hit right now - the retroactive pass must not repeat
+          // it. A HIGH that carried no confirmation factor (volume/geo/behavior only)
+          // stays eligible: the multi-target linkage would still be new information.
+          windowEvent.markConfirmationAlerted();
+        }
       }
 
       if (assessment.severity() != Severity.NONE) {
@@ -246,6 +264,25 @@ public class ProtectionManager {
 
       (this.enforcementActive ? this.enforcePolicy : this.monitorPolicy).apply(observation, assessment);
       this.alertDispatcher.dispatch(observation, assessment, geo);
+
+      // Success-first hits: if this attempt pushed the source across a multi-target tier,
+      // earlier quiet successes from it get their confirmation alert now. Deliberately
+      // dispatch-only (log, event row, webhook) - enforcement stays tied to live attempts,
+      // and the geo of the current attempt applies because the source IP is the same.
+      // The source itself gets the same flagged/stats treatment as any live >= HIGH
+      // assessment: a retro-confirmed checker must not look cleaner than a live one.
+      for (RetroactiveElevation.ElevatedSuccess elevated
+          : this.retroactiveElevation.onAttempt(observation, foreignFailedBefore, snapshot.foreignFailedTargets())) {
+        this.aggregator.markFlagged(observation.getIpString(),
+            observation.getTimestamp() + Settings.IMP.PROTECTION.WINDOWS.DISTRIBUTION_WINDOW_MILLIS);
+        synchronized (this.recentAssessments) {
+          this.recentAssessments.put(observation.getIpString(), new RecentAssessment(
+              observation.getIpString(), elevated.observation().getLowercaseNickname(),
+              elevated.assessment().score(), elevated.assessment().severity(), elevated.observation().getTimestamp()));
+        }
+
+        this.alertDispatcher.dispatch(elevated.observation(), elevated.assessment(), geo);
+      }
     } catch (Throwable t) {
       this.logger.warn("Protection pipeline failure (attempt ignored)", t);
     }
@@ -385,6 +422,15 @@ public class ProtectionManager {
         this.sendRecent(source, limit);
         break;
       }
+      case "inspect": {
+        if (args.length < 3) {
+          source.sendMessage(Component.text("Usage: /limboauth protection inspect <nickname>", NamedTextColor.YELLOW));
+        } else {
+          this.sendInspect(source, args[2].toLowerCase(Locale.ROOT));
+        }
+
+        break;
+      }
       case "test-webhook": {
         this.testWebhook(source);
         break;
@@ -409,7 +455,8 @@ public class ProtectionManager {
         break;
       }
       default: {
-        source.sendMessage(Component.text("Usage: /limboauth protection <status|stats|recent [n]|blocks|unblock <target>|test-webhook>",
+        source.sendMessage(Component.text(
+            "Usage: /limboauth protection <status|stats|recent [n]|inspect <nickname>|blocks|unblock <target>|test-webhook>",
             NamedTextColor.YELLOW));
         break;
       }
@@ -503,6 +550,32 @@ public class ProtectionManager {
         source.sendMessage(Component.text("  [" + this.formatAgo(event.getEventTime()) + "] " + event.getSeverity()
             + " score " + event.getScore() + " " + event.getNickname() + " from " + event.getIp()
             + " (" + event.getOutcome() + ")", NamedTextColor.YELLOW));
+      }
+    } catch (Exception e) {
+      source.sendMessage(Component.text("Failed to query stored events: " + e.getMessage(), NamedTextColor.RED));
+    }
+  }
+
+  /**
+   * Triage view for one account: its recent events WITH the factor breakdown that
+   * produced each score, so an admin can judge a report without grepping the log.
+   */
+  private void sendInspect(CommandSource source, String lowercaseNickname) {
+    try {
+      List<ProtectionEvent> events = this.storage.recentForNickname(lowercaseNickname, 5);
+      if (events.isEmpty()) {
+        source.sendMessage(Component.text("No stored protection events for \"" + lowercaseNickname + "\".", NamedTextColor.GREEN));
+        return;
+      }
+
+      source.sendMessage(Component.text("Last " + events.size() + " protection events for " + lowercaseNickname + ":", NamedTextColor.WHITE));
+      for (ProtectionEvent event : events) {
+        source.sendMessage(Component.text("  [" + this.formatAgo(event.getEventTime()) + "] " + event.getSeverity()
+            + " score " + event.getScore() + " from " + event.getIp() + " (" + event.getOutcome() + ")"
+            + (event.getClientBrand() == null ? "" : " brand \"" + event.getClientBrand() + "\""), NamedTextColor.YELLOW));
+        for (String line : FactorContribution.describeJson(event.getFactors())) {
+          source.sendMessage(Component.text("    " + line, NamedTextColor.GRAY));
+        }
       }
     } catch (Exception e) {
       source.sendMessage(Component.text("Failed to query stored events: " + e.getMessage(), NamedTextColor.RED));

@@ -604,6 +604,29 @@ public class Settings extends YamlConfig {
       public int DORMANT_DAYS = 30;
 
       @Comment({
+          "Distinct OTHER foreign accounts (existing accounts, not the one that succeeded, whose",
+          "stored last-login IP is on another subnet than the source) a password must have been",
+          "tried against before a successful login with it counts as a confirmed spray hit.",
+          "Same-owner alt families relogged from their usual network have zero foreign targets",
+          "and can never trip the confirmation; accounts that never logged in (no stored IP)",
+          "are never counted as foreign. 0 disables the confirmation.",
+          "Default 3: monitor data showed real three-alt families relogged from a rotated or",
+          "new subnet (all stored login IPs elsewhere), which a threshold of 2 flags CRITICAL.",
+          "At 3 such a family peaks at SUSPICIOUS while a spray that reached three or more",
+          "OTHER players' accounts still confirms."
+      })
+      public int SPRAY_FOREIGN_TARGET_MIN = 3;
+
+      @Comment({
+          "Alternative spray-confirmation trigger: the password hit other foreign accounts whose",
+          "stored last-login IPs are spread across at least this many DISTINCT subnets. An alt",
+          "family's accounts live on their owner's network, so they count one subnet; a real",
+          "spray's victims are strangers scattered across unrelated networks. Catches small",
+          "sprays (two scattered victims) that the count threshold above misses. 0 disables."
+      })
+      public int SPRAY_SCATTER_SUBNET_MIN = 2;
+
+      @Comment({
           "Java regexes matched against the client brand. Empty by default to avoid false positives.",
           "Example: [\"(?i).*console.*\", \"(?i)wurst.*\"]"
       })
@@ -636,6 +659,14 @@ public class Settings extends YamlConfig {
         @Comment("One account with failed logins from multiple IPs in the distribution window")
         public int ACCOUNT_DISTINCT_IPS_2 = 15;
         public int ACCOUNT_DISTINCT_IPS_4 = 25;
+        @Comment({
+            "Failed logins against multiple OTHER players' accounts (existing accounts whose stored",
+            "last-login IP is on another subnet than this source) in the distribution window.",
+            "Shared-IP households cannot produce this, so it may weigh more than the raw",
+            "distinct-target factors and lifts a grinding checker to HIGH before it scores a hit."
+        })
+        public int IP_FOREIGN_TARGET_SPREAD_3 = 15;
+        public int IP_FOREIGN_TARGET_SPREAD_5 = 25;
         @Comment("The same password tried against multiple existing accounts in the distribution window")
         public int PASSWORD_SPRAY_3 = 20;
         public int PASSWORD_SPRAY_8 = 35;
@@ -643,9 +674,12 @@ public class Settings extends YamlConfig {
         public int CHURN_SESSIONS_3 = 15;
         @Comment({
             "One IP successfully logging into multiple accounts whose stored last-login IP was a different",
-            "address. Own alts keep their stored IP, so relogging your own accounts never triggers this."
+            "address. Own alts keep their stored IP, so relogging your own accounts never triggers this.",
+            "The 4-tier covers a checker cashing out a list of working credentials - larger than any",
+            "alt family observed relogging at once."
         })
         public int MULTI_ACCOUNT_NEW_SOURCE_2 = 15;
+        public int MULTI_ACCOUNT_NEW_SOURCE_4 = 25;
         @Comment("Successful login on a dormant account (see dormant-days) from a different subnet than its last login")
         public int DORMANT_ACCOUNT_TAKEOVER = 15;
         @Comment("First login command sent almost instantly after spawn")
@@ -662,8 +696,17 @@ public class Settings extends YamlConfig {
         public int CONFIRM_SUCCESS_AFTER_DISTRIBUTED_FAILURES = 80;
         @Comment("Successful login from a source that was already flagged HIGH before this attempt")
         public int CONFIRM_SUCCESS_FROM_FLAGGED_SOURCE = 65;
-        @Comment("Successful login with a password that was part of a spray against multiple accounts")
+        @Comment("Successful login with a password that was part of a spray against multiple foreign accounts (see spray-foreign-target-min)")
         public int CONFIRM_SPRAYED_PASSWORD_SUCCESS = 80;
+        @Comment({
+            "Successful login on a FOREIGN account (stored last-login IP on another subnet) from",
+            "a source that recently FAILED against several other players' foreign accounts - the",
+            "checker-with-a-hit pattern. A neighbor logging into their OWN account behind the same",
+            "source is never confirmed by failures they did not produce. Also used retroactively:",
+            "a success that happened BEFORE the source crossed a tier is re-reported once it does."
+        })
+        public int CONFIRM_SUCCESS_FROM_MULTI_TARGET_SOURCE_3 = 50;
+        public int CONFIRM_SUCCESS_FROM_MULTI_TARGET_SOURCE_6 = 80;
       }
     }
 
@@ -689,7 +732,12 @@ public class Settings extends YamlConfig {
     @Create
     public STORAGE STORAGE;
 
-    @Comment("Detection events are stored in the PROTECTION_EVENTS table for threshold tuning")
+    @Comment({
+        "Detection events are stored for threshold tuning in a plugin-local H2 database",
+        "(plugins/limboauth/protection-events-v2), separate from the auth database. Rows an",
+        "older version stored in the auth database are moved over automatically on startup",
+        "and the old PROTECTION_EVENTS table is dropped there."
+    })
     public static class STORAGE {
 
       @Comment("Minimum severity persisted to the database: INFO, SUSPICIOUS, HIGH or CRITICAL")

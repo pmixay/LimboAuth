@@ -18,11 +18,13 @@
 package net.elytrium.limboauth.protection.aggregate;
 
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import net.elytrium.limboauth.Settings;
 import net.elytrium.limboauth.protection.AttemptObservation;
 import net.elytrium.limboauth.protection.AttemptOutcome;
+import net.elytrium.limboauth.protection.SubnetKey;
 
 /**
  * Sliding-window aggregates keyed by IP, subnet, account and password fingerprint.
@@ -37,7 +39,12 @@ public class ProtectionAggregator {
   private final Map<Long, ActivityWindow> fingerprintWindows = new ConcurrentHashMap<>();
   private final Map<String, Long> flaggedSources = new ConcurrentHashMap<>();
 
-  public void update(AttemptObservation observation) {
+  /**
+   * Folds the observation into every window it belongs to and returns the shared event,
+   * so the caller can mark it once its assessment is known (see
+   * {@link ActivityWindow.AttemptEvent#markConfirmationAlerted()}).
+   */
+  public ActivityWindow.AttemptEvent update(AttemptObservation observation) {
     Settings.PROTECTION.WINDOWS windows = Settings.IMP.PROTECTION.WINDOWS;
     int maxEvents = windows.MAX_EVENTS_PER_WINDOW;
 
@@ -52,6 +59,10 @@ public class ProtectionAggregator {
         && !storedLoginIp.isEmpty()
         && !storedLoginIp.equals(observation.getIpString());
 
+    String storedSubnet = SubnetKey.ofLiteral(storedLoginIp);
+    boolean foreignTarget = observation.isAccountExists()
+        && SubnetKey.isForeignSubnet(storedSubnet, observation.getSubnetKey());
+
     ActivityWindow.AttemptEvent event = new ActivityWindow.AttemptEvent(
         observation.getTimestamp(),
         observation.getLowercaseNickname(),
@@ -59,7 +70,9 @@ public class ProtectionAggregator {
         observation.getIpString(),
         observation.getOutcome(),
         churn,
-        newSource
+        newSource,
+        foreignTarget,
+        storedSubnet
     );
 
     this.windowFor(this.ipWindows, observation.getIpString(), windows.MAX_TRACKED_IPS).add(event, maxEvents);
@@ -74,12 +87,14 @@ public class ProtectionAggregator {
         this.windowFor(this.fingerprintWindows, observation.getPasswordFingerprint(), windows.MAX_TRACKED_FINGERPRINTS).add(event, maxEvents);
       }
     }
+
+    return event;
   }
 
   public AggregateSnapshot snapshot(AttemptObservation observation) {
     long now = observation.getTimestamp();
     long volumeSince = now - Settings.IMP.PROTECTION.WINDOWS.VOLUME_WINDOW_MILLIS;
-    long distributionSince = now - Settings.IMP.PROTECTION.WINDOWS.DISTRIBUTION_WINDOW_MILLIS;
+    long distributionSince = distributionSince(now);
 
     ActivityWindow ipWindow = this.ipWindows.get(observation.getIpString());
     ActivityWindow subnetWindow = this.subnetWindows.get(observation.getSubnetKey());
@@ -100,8 +115,38 @@ public class ProtectionAggregator {
         accountWindow == null ? 0 : accountWindow.distinctFailIps(distributionSince),
         accountWindow == null ? 0 : accountWindow.countFailsFromOtherIps(distributionSince, observation.getIpString()),
         fingerprintWindow == null ? 0 : fingerprintWindow.distinctFingerprintTargets(distributionSince),
-        this.isFlagged(observation.getIpString(), now)
+        this.isFlagged(observation.getIpString(), now),
+        fingerprintWindow == null ? 0 : fingerprintWindow.distinctForeignFingerprintTargets(distributionSince, observation.getLowercaseNickname()),
+        ipWindow == null ? 0 : ipWindow.distinctForeignFailedTargets(distributionSince),
+        fingerprintWindow == null ? 0 : fingerprintWindow.distinctForeignFingerprintTargetSubnets(distributionSince, observation.getLowercaseNickname())
     );
+  }
+
+  /**
+   * The source's current foreign-failed-target count, read WITHOUT folding anything in.
+   * The manager samples it before and after {@link #update} to detect the moment a
+   * source crosses a multi-target tier and owes its earlier successes a second look.
+   */
+  public int foreignFailedTargets(AttemptObservation observation) {
+    ActivityWindow ipWindow = this.ipWindows.get(observation.getIpString());
+    return ipWindow == null ? 0 : ipWindow.distinctForeignFailedTargets(distributionSince(observation.getTimestamp()));
+  }
+
+  /**
+   * Recent successes from this observation's source on foreign targets that were never
+   * reported at confirmation severity - the candidates for retroactive elevation.
+   */
+  public List<ActivityWindow.AttemptEvent> unalertedForeignSuccesses(AttemptObservation observation) {
+    ActivityWindow ipWindow = this.ipWindows.get(observation.getIpString());
+    return ipWindow == null ? List.of() : ipWindow.unalertedForeignSuccesses(distributionSince(observation.getTimestamp()));
+  }
+
+  /**
+   * One horizon for the snapshot, the pre-update sample and the retroactive scan: the
+   * tier-crossing comparison is only sound while all three share it exactly.
+   */
+  private static long distributionSince(long now) {
+    return now - Settings.IMP.PROTECTION.WINDOWS.DISTRIBUTION_WINDOW_MILLIS;
   }
 
   public void markFlagged(String ip, long untilTime) {

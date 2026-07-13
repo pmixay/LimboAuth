@@ -41,6 +41,26 @@ public final class SubnetKey {
   }
 
   /**
+   * The single definition of a "foreign" stored address: present, parseable and on a
+   * different subnet than the given key. Subnet-level (not exact-IP) so a returning
+   * player on a rotated dynamic address inside their usual ISP block is not foreign.
+   * Used by the DORMANT_ACCOUNT_TAKEOVER comparison and every foreign-target count -
+   * keep them agreeing by changing it only here. An absent or unparsable stored address
+   * is NOT foreign: unknown must never score against a player.
+   */
+  public static boolean isForeign(@Nullable String storedAddress, String subnetKey) {
+    return isForeignSubnet(ofLiteral(storedAddress), subnetKey);
+  }
+
+  /**
+   * Same predicate for a stored subnet that the caller already parsed with
+   * {@link #ofLiteral} (the aggregator keeps the parsed subnet on the window event).
+   */
+  public static boolean isForeignSubnet(@Nullable String storedSubnet, String subnetKey) {
+    return storedSubnet != null && !storedSubnet.equals(subnetKey);
+  }
+
+  /**
    * Canonical subnet key: /24 for IPv4, /64 for IPv6.
    */
   public static String of(InetAddress address) {

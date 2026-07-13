@@ -22,6 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.net.InetAddress;
+import java.util.List;
 import net.elytrium.limboauth.protection.AttemptObservation;
 import net.elytrium.limboauth.protection.AttemptOutcome;
 import net.elytrium.limboauth.protection.TestSettings;
@@ -85,6 +86,73 @@ class ProtectionAggregatorTest {
     aggregator.update(fail);
 
     assertEquals(2, aggregator.snapshot(fail).ipDistinctNewSourceSuccesses());
+  }
+
+  /**
+   * The foreign-target counts only see existing accounts whose stored LOGINIP sits on a
+   * different subnet than the source: the owner's own accounts (stored on the source's
+   * subnet), never-logged-in rows and nonexistent names all stay invisible to them.
+   */
+  @Test
+  void foreignCountsExcludeOwnSubnetUnknownAndNonexistentAccounts() throws Exception {
+    ProtectionAggregator aggregator = new ProtectionAggregator();
+    long now = 1_000_000_000L;
+    String ip = "203.0.113.7";
+
+    // Foreign: exists, stored on another subnet.
+    aggregator.update(this.storedFail("victim1", ip, now, "198.51.100.4", true));
+    // The source's own subnet: an alt or the player's own account after a router reboot.
+    aggregator.update(this.storedFail("ownalt", ip, now + 1000, "203.0.113.200", true));
+    // No stored login IP at all (registered but never logged in, or a legacy row).
+    aggregator.update(this.storedFail("fresh", ip, now + 2000, null, true));
+    // Nonexistent username.
+    aggregator.update(this.storedFail("ghost", ip, now + 3000, "198.51.100.9", false));
+
+    AttemptObservation last = this.storedFail("victim2", ip, now + 4000, "198.51.100.5", true);
+    aggregator.update(last);
+    AggregateSnapshot snapshot = aggregator.snapshot(last);
+
+    // The raw counts still see every existing account; the foreign fail count only the
+    // two victims, and the fingerprint count additionally excludes the current target
+    // (victim2) - it answers "how many OTHER foreign accounts got this password".
+    assertEquals(4, snapshot.ipDistinctFailedTargets());
+    assertEquals(4, snapshot.fingerprintDistinctTargets());
+    assertEquals(2, snapshot.foreignFailedTargets());
+    assertEquals(1, snapshot.foreignFingerprintTargets());
+    // victim1 and victim2 are stored on the same /24 and victim2 (the current target)
+    // is excluded, so exactly one other stored subnet remains.
+    assertEquals(1, snapshot.foreignFingerprintSubnets());
+  }
+
+  @Test
+  void foreignFailedTargetsCanBeReadWithoutFoldingTheAttemptIn() throws Exception {
+    ProtectionAggregator aggregator = new ProtectionAggregator();
+    long now = 1_000_000_000L;
+    String ip = "203.0.113.7";
+
+    AttemptObservation attempt = this.storedFail("victim1", ip, now, "198.51.100.4", true);
+    assertEquals(0, aggregator.foreignFailedTargets(attempt));
+    aggregator.update(attempt);
+    assertEquals(1, aggregator.foreignFailedTargets(this.storedFail("victim2", ip, now + 1000, "198.51.100.5", true)));
+  }
+
+  @Test
+  void unalertedForeignSuccessesSkipMarkedAndOwnSubnetEvents() throws Exception {
+    ProtectionAggregator aggregator = new ProtectionAggregator();
+    long now = 1_000_000_000L;
+    String ip = "203.0.113.7";
+
+    final ActivityWindow.AttemptEvent foreignHit = aggregator.update(this.success("stolen", ip, now, "198.51.100.4"));
+    aggregator.update(this.success("ownalt", ip, now + 1000, ip));
+    AttemptObservation probe = this.storedFail("victim", ip, now + 2000, "198.51.100.9", true);
+    aggregator.update(probe);
+
+    List<ActivityWindow.AttemptEvent> candidates = aggregator.unalertedForeignSuccesses(probe);
+    assertEquals(1, candidates.size());
+    assertEquals("stolen", candidates.get(0).nickname());
+
+    foreignHit.markConfirmationAlerted();
+    assertTrue(aggregator.unalertedForeignSuccesses(probe).isEmpty());
   }
 
   @Test
@@ -184,6 +252,16 @@ class ProtectionAggregatorTest {
         .millisSinceJoin(5000)
         .storedLoginIp(storedLoginIp)
         .fingerprint(7L)
+        .build();
+  }
+
+  private AttemptObservation storedFail(String nickname, String ip, long time, String storedLoginIp, boolean accountExists) throws Exception {
+    return AttemptObservation.builder(nickname, InetAddress.getByName(ip), AttemptOutcome.LOGIN_FAIL)
+        .accountExists(accountExists)
+        .timestamp(time)
+        .millisSinceJoin(5000)
+        .storedLoginIp(storedLoginIp)
+        .fingerprint(777L)
         .build();
   }
 }

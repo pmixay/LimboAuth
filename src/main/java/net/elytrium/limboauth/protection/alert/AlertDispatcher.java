@@ -17,8 +17,6 @@
 
 package net.elytrium.limboauth.protection.alert;
 
-import com.google.gson.JsonArray;
-import com.google.gson.JsonObject;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -92,7 +90,7 @@ public class AlertDispatcher {
           observation.getIpString(),
           observation.getSubnetKey(),
           observation.getOutcome().name(),
-          this.factorsJson(assessment.contributions()),
+          FactorContribution.toJson(assessment.contributions()),
           observation.getClientBrand(),
           geo == null ? null : geo.countryIso(),
           geo == null ? null : geo.asn()
@@ -191,19 +189,6 @@ public class AlertDispatcher {
     }
 
     return builder.toString();
-  }
-
-  private String factorsJson(List<FactorContribution> contributions) {
-    JsonArray array = new JsonArray();
-    for (FactorContribution contribution : contributions) {
-      JsonObject entry = new JsonObject();
-      entry.addProperty("f", contribution.factor().name());
-      entry.addProperty("p", contribution.points());
-      entry.addProperty("d", contribution.detail());
-      array.add(entry);
-    }
-
-    return array.toString();
   }
 
   private static class ClusterState {

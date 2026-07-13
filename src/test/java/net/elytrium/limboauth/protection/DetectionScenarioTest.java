@@ -338,8 +338,10 @@ class DetectionScenarioTest {
   }
 
   /**
-   * Password spraying: the same password tried against many accounts, low-and-slow,
-   * and the moment it works it must be CRITICAL.
+   * Password spraying: the same password tried against many accounts stored on OTHER
+   * networks, low-and-slow, and the moment it works it must be CRITICAL. The stored
+   * login IPs are what makes the targets foreign - see the alt-family scenario below
+   * for the same shape without them.
    */
   @Test
   void passwordSprayEscalatesAndHitIsCritical() throws Exception {
@@ -355,6 +357,7 @@ class DetectionScenarioTest {
           .timestamp(now + i * 600000L)
           .millisSinceJoin(800)
           .firstAttemptOfSession(true)
+          .storedLoginIp("192.0.2." + (10 + i))
           .fingerprint(sprayedPassword)
           .build();
       aggregator.update(fail);
@@ -367,13 +370,308 @@ class DetectionScenarioTest {
         .timestamp(now + 5 * 600000L)
         .millisSinceJoin(900)
         .firstAttemptOfSession(true)
+        .storedLoginIp("192.0.2.30")
         .fingerprint(sprayedPassword)
         .build();
     aggregator.update(hit);
     RiskAssessment assessment = scorer.score(hit, aggregator.snapshot(hit), null, null);
 
+    assertTrue(assessment.hasFactor(RiskFactor.CONFIRM_SPRAYED_PASSWORD_SUCCESS));
     assertTrue(assessment.severity().atLeast(Severity.CRITICAL),
         "a sprayed password that works must be CRITICAL, got " + assessment.severity());
+  }
+
+  /**
+   * FP regression (production finding A, the dnecek family): one person reuses one
+   * password across their own typo-alts and relogs them all from the family's usual IP.
+   * The raw spray count sees 3 distinct accounts, but every stored login IP is the
+   * source itself - zero foreign targets - so the old CRITICAL 100 must collapse to
+   * INFO-level noise.
+   */
+  @Test
+  void ownAltFamilySharedPasswordStaysBelowSuspicious() throws Exception {
+    ProtectionAggregator aggregator = new ProtectionAggregator();
+    RiskScorer scorer = new RiskScorer();
+    long now = 1_700_000_000_000L;
+    String familyIp = "217.114.146.6";
+    long sharedPassword = 424242L;
+    String[] alts = {"danecek2014", "dnecek2014", "danecek14"};
+
+    Severity worst = Severity.NONE;
+    RiskAssessment last = null;
+    for (int i = 0; i < alts.length; ++i) {
+      AttemptObservation relog = AttemptObservation
+          .builder(alts[i], InetAddress.getByName(familyIp), AttemptOutcome.LOGIN_SUCCESS)
+          .accountExists(true)
+          .timestamp(now + i * 240000L)
+          .millisSinceJoin(4000)
+          .firstAttemptOfSession(true)
+          .clientBrand("optifine")
+          .storedLoginIp(familyIp)
+          .storedLoginDate(now - 3L * 86400000)
+          .fingerprint(sharedPassword)
+          .build();
+      aggregator.update(relog);
+      last = scorer.score(relog, aggregator.snapshot(relog), null, null);
+      if (last.severity().atLeast(worst)) {
+        worst = last.severity();
+      }
+    }
+
+    assertTrue(last.hasFactor(RiskFactor.PASSWORD_SPRAY), "the breadcrumb factor may fire");
+    assertFalse(last.hasFactor(RiskFactor.CONFIRM_SPRAYED_PASSWORD_SUCCESS),
+        "an alt family must never trip the spray confirmation");
+    assertFalse(worst.atLeast(Severity.SUSPICIOUS),
+        "own alts sharing one password must stay below SUSPICIOUS, got " + worst);
+  }
+
+  /**
+   * FP regression (production, the smertyypvp family): THREE own alts sharing one
+   * password, all stored at the family's previous subnet, relogged back-to-back from a
+   * new address. Every target is foreign, so only the other-target count separates this
+   * from a spray: with the production-fitted minimum of 3 other foreign accounts, a
+   * three-alt family peaks at SUSPICIOUS instead of the CRITICAL 115 observed live.
+   */
+  @Test
+  void travelingAltFamilySharedPasswordStaysBelowHigh() throws Exception {
+    ProtectionAggregator aggregator = new ProtectionAggregator();
+    RiskScorer scorer = new RiskScorer();
+    long now = 1_700_000_000_000L;
+    String homeIp = "198.51.100.44";
+    long sharedPassword = 434343L;
+
+    Severity worst = Severity.NONE;
+    RiskAssessment last = null;
+    for (String alt : new String[] {"alt1", "alt2", "alt3"}) {
+      AttemptObservation relog = AttemptObservation
+          .builder(alt, InetAddress.getByName("203.0.113.77"), AttemptOutcome.LOGIN_SUCCESS)
+          .accountExists(true)
+          .timestamp(now)
+          .millisSinceJoin(5000)
+          .firstAttemptOfSession(true)
+          .clientBrand("vanilla")
+          .storedLoginIp(homeIp)
+          .storedLoginDate(now - 2L * 86400000)
+          .fingerprint(sharedPassword)
+          .build();
+      aggregator.update(relog);
+      last = scorer.score(relog, aggregator.snapshot(relog), null, null);
+      if (last.severity().atLeast(worst)) {
+        worst = last.severity();
+      }
+
+      now += 240000;
+    }
+
+    assertFalse(last.hasFactor(RiskFactor.CONFIRM_SPRAYED_PASSWORD_SUCCESS),
+        "two other foreign alts must not confirm a spray");
+    assertFalse(worst.atLeast(Severity.HIGH),
+        "a traveling three-alt family must stay below HIGH, got " + worst);
+  }
+
+  /**
+   * FN regression (production finding B, failures-first shape): a checker IP fails
+   * against four other players' accounts and then logs into a fifth. Before the
+   * multi-target-source confirmation the hit logged INFO 20 and cost the account;
+   * now it must be HIGH.
+   */
+  @Test
+  void checkerSuccessAfterForeignFailuresReachesHigh() throws Exception {
+    ProtectionAggregator aggregator = new ProtectionAggregator();
+    RiskScorer scorer = new RiskScorer();
+    long now = 1_700_000_000_000L;
+    String checkerIp = "185.159.162.53";
+
+    for (int i = 0; i < 4; ++i) {
+      AttemptObservation fail = AttemptObservation
+          .builder("cracked" + i, InetAddress.getByName(checkerIp), AttemptOutcome.LOGIN_FAIL)
+          .accountExists(true)
+          .timestamp(now + i * 7L * 60000)
+          .millisSinceJoin(3000)
+          .firstAttemptOfSession(true)
+          .clientBrand("vanilla")
+          .storedLoginIp("192.0.2." + (10 + i))
+          .fingerprint(7000L + i)
+          .build();
+      aggregator.update(fail);
+      scorer.score(fail, aggregator.snapshot(fail), null, null);
+    }
+
+    AttemptObservation hit = AttemptObservation
+        .builder("finsterry", InetAddress.getByName(checkerIp), AttemptOutcome.LOGIN_SUCCESS)
+        .accountExists(true)
+        .timestamp(now + 30L * 60000)
+        .millisSinceJoin(3000)
+        .firstAttemptOfSession(true)
+        .clientBrand("vanilla")
+        .storedLoginIp("192.0.2.99")
+        .fingerprint(7100L)
+        .build();
+    aggregator.update(hit);
+    RiskAssessment assessment = scorer.score(hit, aggregator.snapshot(hit), null, null);
+
+    assertTrue(assessment.hasFactor(RiskFactor.CONFIRM_SUCCESS_FROM_MULTI_TARGET_SOURCE));
+    assertTrue(assessment.severity().atLeast(Severity.HIGH),
+        "a success from a multi-target source must be HIGH, got " + assessment.severity());
+  }
+
+  /**
+   * FN guard: a checker grinding OTHER players' accounts must reach HIGH - and thus a
+   * flagged source - BEFORE it scores a hit, so that even a hit on an account the
+   * foreign gates cannot vouch for (a legacy row with no stored login IP) is still
+   * confirmed via the flagged-source factor.
+   */
+  @Test
+  void grindingCheckerIsFlaggedBeforeTheHitSoLegacyRowHitsConfirm() throws Exception {
+    ProtectionAggregator aggregator = new ProtectionAggregator();
+    RiskScorer scorer = new RiskScorer();
+    long now = 1_700_000_000_000L;
+    String checkerIp = "185.220.101.34";
+
+    Severity worstFail = Severity.NONE;
+    for (int i = 0; i < 5; ++i) {
+      long joinTime = now + i * 6L * 60000;
+      AttemptObservation fail = AttemptObservation
+          .builder("cracked" + i, InetAddress.getByName(checkerIp), AttemptOutcome.LOGIN_FAIL)
+          .accountExists(true)
+          .timestamp(joinTime)
+          .millisSinceJoin(3000)
+          .firstAttemptOfSession(true)
+          .clientBrand("vanilla")
+          .storedLoginIp("192.0.2." + (10 + i))
+          .fingerprint(8000L + i)
+          .build();
+      aggregator.update(fail);
+      RiskAssessment assessment = scorer.score(fail, aggregator.snapshot(fail), null, null);
+      if (assessment.severity().atLeast(worstFail)) {
+        worstFail = assessment.severity();
+      }
+
+      if (assessment.severity().atLeast(Severity.HIGH)) {
+        // Mirror of ProtectionManager#process: HIGH assessments flag the source.
+        aggregator.markFlagged(checkerIp, joinTime + 3600000);
+      }
+
+      aggregator.update(AttemptObservation
+          .builder("cracked" + i, InetAddress.getByName(checkerIp), AttemptOutcome.SESSION_END)
+          .accountExists(true)
+          .timestamp(joinTime + 8000)
+          .millisSinceJoin(11000)
+          .sessionAttempts(1)
+          .build());
+    }
+
+    assertTrue(worstFail.atLeast(Severity.HIGH),
+        "a source failing against five other players' accounts must be flagged HIGH, got " + worstFail);
+
+    // The hit lands on a legacy row: the account exists but has no stored login IP, so
+    // no foreign gate can vouch for it - only the flagged source does.
+    AttemptObservation hit = AttemptObservation
+        .builder("legacyrow", InetAddress.getByName(checkerIp), AttemptOutcome.LOGIN_SUCCESS)
+        .accountExists(true)
+        .timestamp(now + 32L * 60000)
+        .millisSinceJoin(3000)
+        .firstAttemptOfSession(true)
+        .clientBrand("vanilla")
+        .fingerprint(8100L)
+        .build();
+    aggregator.update(hit);
+    RiskAssessment assessment = scorer.score(hit, aggregator.snapshot(hit), null, null);
+
+    assertTrue(assessment.hasFactor(RiskFactor.CONFIRM_SUCCESS_FROM_FLAGGED_SOURCE));
+    assertTrue(assessment.severity().atLeast(Severity.HIGH),
+        "a hit from a flagged grinding source must be HIGH even on a legacy row, got " + assessment.severity());
+  }
+
+  /**
+   * FN guard: a SMALL spray - one password failed against just two strangers, then a
+   * hit on a third - stays below the count threshold, but the victims' stored subnets
+   * are scattered across unrelated networks, which an alt family cannot produce.
+   */
+  @Test
+  void smallScatteredSprayHitIsCritical() throws Exception {
+    ProtectionAggregator aggregator = new ProtectionAggregator();
+    RiskScorer scorer = new RiskScorer();
+    long now = 1_700_000_000_000L;
+    String sprayIp = "203.0.113.42";
+    long sprayedPassword = 51337L;
+    String[][] victims = {{"victima", "192.0.2.5"}, {"victimb", "198.18.4.5"}};
+
+    for (int i = 0; i < victims.length; ++i) {
+      AttemptObservation fail = AttemptObservation
+          .builder(victims[i][0], InetAddress.getByName(sprayIp), AttemptOutcome.LOGIN_FAIL)
+          .accountExists(true)
+          .timestamp(now + i * 300000L)
+          .millisSinceJoin(3000)
+          .firstAttemptOfSession(true)
+          .clientBrand("vanilla")
+          .storedLoginIp(victims[i][1])
+          .fingerprint(sprayedPassword)
+          .build();
+      aggregator.update(fail);
+      scorer.score(fail, aggregator.snapshot(fail), null, null);
+    }
+
+    AttemptObservation hit = AttemptObservation
+        .builder("victimc", InetAddress.getByName(sprayIp), AttemptOutcome.LOGIN_SUCCESS)
+        .accountExists(true)
+        .timestamp(now + 900000L)
+        .millisSinceJoin(3000)
+        .firstAttemptOfSession(true)
+        .clientBrand("vanilla")
+        .storedLoginIp("172.16.9.9")
+        .fingerprint(sprayedPassword)
+        .build();
+    aggregator.update(hit);
+    RiskAssessment assessment = scorer.score(hit, aggregator.snapshot(hit), null, null);
+
+    assertTrue(assessment.hasFactor(RiskFactor.CONFIRM_SPRAYED_PASSWORD_SUCCESS),
+        "two scattered victims must confirm the sprayed hit");
+    assertTrue(assessment.severity().atLeast(Severity.CRITICAL),
+        "a scattered spray hit must be CRITICAL, got " + assessment.severity());
+  }
+
+  /**
+   * FPR guard for the multi-target confirmation: a shared IP (school/CGNAT) where three
+   * players mistype their OWN passwords - stored login IPs on the shared subnet - and a
+   * fourth then logs in cleanly. Non-foreign failures must not confirm the success.
+   */
+  @Test
+  void sharedIpOwnAccountFailuresDoNotConfirmANeighborsSuccess() throws Exception {
+    ProtectionAggregator aggregator = new ProtectionAggregator();
+    RiskScorer scorer = new RiskScorer();
+    long now = 1_700_000_000_000L;
+    String sharedIp = "192.0.2.50";
+
+    for (int player = 0; player < 3; ++player) {
+      AttemptObservation fail = AttemptObservation
+          .builder("classmate" + player, InetAddress.getByName(sharedIp), AttemptOutcome.LOGIN_FAIL)
+          .accountExists(true)
+          .timestamp(now + player * 60000L)
+          .millisSinceJoin(5000)
+          .clientBrand("fabric")
+          .storedLoginIp(sharedIp)
+          .fingerprint(4000L + player)
+          .build();
+      aggregator.update(fail);
+      scorer.score(fail, aggregator.snapshot(fail), null, null);
+    }
+
+    AttemptObservation success = AttemptObservation
+        .builder("classmate3", InetAddress.getByName(sharedIp), AttemptOutcome.LOGIN_SUCCESS)
+        .accountExists(true)
+        .timestamp(now + 240000L)
+        .millisSinceJoin(5000)
+        .clientBrand("fabric")
+        .storedLoginIp(sharedIp)
+        .fingerprint(4100L)
+        .build();
+    aggregator.update(success);
+    RiskAssessment assessment = scorer.score(success, aggregator.snapshot(success), null, null);
+
+    assertFalse(assessment.hasFactor(RiskFactor.CONFIRM_SUCCESS_FROM_MULTI_TARGET_SOURCE));
+    assertFalse(assessment.severity().atLeast(Severity.HIGH),
+        "a neighbor's clean login behind a shared IP must stay below HIGH, got " + assessment.severity());
   }
 
   private AttemptObservation altLogin(ProtectionAggregator aggregator, String nickname, long time,

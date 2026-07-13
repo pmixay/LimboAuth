@@ -25,4 +25,12 @@ public record RiskAssessment(int score, Severity severity, List<FactorContributi
   public boolean hasFactor(RiskFactor factor) {
     return this.contributions.stream().anyMatch(contribution -> contribution.factor() == factor);
   }
+
+  /**
+   * Whether any CONFIRMATION-category factor contributed: the signal that a success was
+   * reported as a probable hit, not merely as generically risky (volume/geo/behavior).
+   */
+  public boolean hasConfirmationFactor() {
+    return this.contributions.stream().anyMatch(contribution -> contribution.factor().getCategory() == FactorCategory.CONFIRMATION);
+  }
 }

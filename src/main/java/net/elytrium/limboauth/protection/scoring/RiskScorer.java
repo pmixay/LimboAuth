@@ -44,6 +44,13 @@ import org.checkerframework.checker.nullness.qual.Nullable;
  */
 public class RiskScorer {
 
+  /**
+   * Foreign-failed-target counts at which the multi-target-source confirmation escalates,
+   * descending as {@link #tiered} expects. Shared with the retroactive pass through
+   * {@link #crossedMultiTargetTier} so both react at exactly the same boundaries.
+   */
+  private static final int[] MULTI_TARGET_SOURCE_TIERS = {6, 3};
+
   private volatile List<String> brandRegexSource;
   private volatile List<Pattern> brandPatterns = List.of();
   private volatile List<String> hostingAsnSource;
@@ -74,6 +81,14 @@ public class RiskScorer {
     distribution += this.tiered(contributions, RiskFactor.ACCOUNT_DISTINCT_IPS, snapshot.accountDistinctFailIps(),
         new int[] {4, 2}, new int[] {weights.ACCOUNT_DISTINCT_IPS_4, weights.ACCOUNT_DISTINCT_IPS_2},
         "this account failed from " + snapshot.accountDistinctFailIps() + " distinct IPs in the distribution window");
+    // Foreign refinement of the raw distinct-target volume factor: failures against other
+    // players' accounts, which a shared-IP household cannot produce. Lifts a grinding
+    // checker to HIGH (and thus a flagged source) BEFORE it scores a hit, so the eventual
+    // success is confirmed by the flagged-source factor even when the hit lands on an
+    // account the foreign gates cannot vouch for (e.g. no stored login IP yet).
+    distribution += this.tiered(contributions, RiskFactor.IP_FOREIGN_TARGET_SPREAD, snapshot.foreignFailedTargets(),
+        new int[] {5, 3}, new int[] {weights.IP_FOREIGN_TARGET_SPREAD_5, weights.IP_FOREIGN_TARGET_SPREAD_3},
+        "failed logins against " + snapshot.foreignFailedTargets() + " other players' accounts from this source in the distribution window");
     distribution += this.tiered(contributions, RiskFactor.PASSWORD_SPRAY, snapshot.fingerprintDistinctTargets(),
         new int[] {8, 3}, new int[] {weights.PASSWORD_SPRAY_8, weights.PASSWORD_SPRAY_3},
         "the same password was tried against " + snapshot.fingerprintDistinctTargets() + " distinct accounts");
@@ -82,7 +97,7 @@ public class RiskScorer {
         new int[] {3}, new int[] {weights.CHURN_SESSIONS_3},
         churnSessions + " short join-attempt-quit sessions from this source in the distribution window");
     distribution += this.tiered(contributions, RiskFactor.MULTI_ACCOUNT_NEW_SOURCE_SUCCESS, snapshot.ipDistinctNewSourceSuccesses(),
-        new int[] {2}, new int[] {weights.MULTI_ACCOUNT_NEW_SOURCE_2},
+        new int[] {4, 2}, new int[] {weights.MULTI_ACCOUNT_NEW_SOURCE_4, weights.MULTI_ACCOUNT_NEW_SOURCE_2},
         snapshot.ipDistinctNewSourceSuccesses() + " accounts whose last login came from elsewhere were logged into from this IP");
     distribution += this.dormantTakeover(contributions, observation, weights, scoring);
 
@@ -133,10 +148,31 @@ public class RiskScorer {
             weights.CONFIRM_SUCCESS_FROM_FLAGGED_SOURCE, "successful login from a source flagged HIGH before this attempt");
       }
 
-      if (snapshot.fingerprintDistinctTargets() >= 3) {
+      // Foreign OTHER targets only: one person reusing one password across their own
+      // alts (stored LOGINIP on the source's subnet) satisfies the raw distinct-target
+      // count but is not a spray, and the hit itself is never evidence of the spray -
+      // the count that confirms covers other players' accounts. Two triggers, each 0 to
+      // disable: enough other foreign targets outright, or fewer targets whose stored
+      // subnets are SCATTERED - a family's alts live on their owner's network(s), a real
+      // spray's victims are strangers spread across unrelated ones.
+      int sprayForeignMin = scoring.SPRAY_FOREIGN_TARGET_MIN;
+      int sprayScatterMin = scoring.SPRAY_SCATTER_SUBNET_MIN;
+      boolean sprayByCount = sprayForeignMin > 0 && snapshot.foreignFingerprintTargets() >= sprayForeignMin;
+      boolean sprayByScatter = sprayScatterMin > 0 && snapshot.foreignFingerprintSubnets() >= sprayScatterMin;
+      if (sprayByCount || sprayByScatter) {
         confirmation += this.add(contributions, RiskFactor.CONFIRM_SPRAYED_PASSWORD_SUCCESS,
             weights.CONFIRM_SPRAYED_PASSWORD_SUCCESS,
-            "the successful password was sprayed against " + snapshot.fingerprintDistinctTargets() + " accounts");
+            "the successful password was sprayed against " + snapshot.foreignFingerprintTargets()
+                + " other accounts stored on " + snapshot.foreignFingerprintSubnets() + " other networks");
+      }
+
+      // The success must itself be on a foreign account, mirroring the retroactive pass:
+      // a checker's hit lands on somebody ELSE's account, while an innocent neighbor
+      // logging into their own account behind the same source must never be confirmed
+      // by failures they did not produce.
+      if (observation.isAccountExists() && SubnetKey.isForeign(observation.getStoredLoginIp(), observation.getSubnetKey())) {
+        confirmation += this.multiTargetSourceContribution(contributions, snapshot.foreignFailedTargets(),
+            "successful login from a source that recently failed against " + snapshot.foreignFailedTargets() + " other players' accounts");
       }
     }
 
@@ -146,20 +182,71 @@ public class RiskScorer {
         + Math.min(geo, scoring.CAP_GEO)
         + confirmation;
 
-    Severity severity;
-    if (score >= scoring.THRESHOLD_CRITICAL) {
-      severity = Severity.CRITICAL;
-    } else if (score >= scoring.THRESHOLD_HIGH) {
-      severity = Severity.HIGH;
-    } else if (score >= scoring.THRESHOLD_SUSPICIOUS) {
-      severity = Severity.SUSPICIOUS;
-    } else if (score >= scoring.THRESHOLD_INFO) {
-      severity = Severity.INFO;
-    } else {
-      severity = Severity.NONE;
+    return new RiskAssessment(score, this.severityOf(score, scoring), List.copyOf(contributions),
+        this.clusterKey(observation, contributions, confirmation > 0));
+  }
+
+  /**
+   * Assessment for a success that predates its source crossing a multi-target tier: the
+   * same factor, weights and thresholds as the live path, evaluated against the source's
+   * current foreign-failure spread. Returns {@code null} when the reached tier is
+   * disabled (weight 0), so a config that switches the factor off also silences the
+   * retroactive pass.
+   */
+  @Nullable
+  public RiskAssessment scoreRetroactiveMultiTargetSuccess(String lowercaseNickname, int foreignFailedTargets, long millisSinceSuccess) {
+    Settings.PROTECTION.SCORING scoring = Settings.IMP.PROTECTION.SCORING;
+
+    List<FactorContribution> contributions = new ArrayList<>();
+    int score = this.multiTargetSourceContribution(contributions, foreignFailedTargets,
+        "successful login " + TimeUnit.MILLISECONDS.toMinutes(millisSinceSuccess) + " min earlier from a source that has since failed against "
+            + foreignFailedTargets + " other players' accounts (retroactive confirmation)");
+    if (score == 0) {
+      return null;
     }
 
-    return new RiskAssessment(score, severity, List.copyOf(contributions), this.clusterKey(observation, contributions, confirmation > 0));
+    return new RiskAssessment(score, this.severityOf(score, scoring), List.copyOf(contributions), "account:" + lowercaseNickname);
+  }
+
+  /**
+   * The one place the multi-target tiers are paired with their weights, so the live
+   * confirmation and the retroactive pass can never drift apart.
+   */
+  private int multiTargetSourceContribution(List<FactorContribution> contributions, int foreignFailedTargets, String detail) {
+    Settings.PROTECTION.SCORING.WEIGHTS weights = Settings.IMP.PROTECTION.SCORING.WEIGHTS;
+    return this.tiered(contributions, RiskFactor.CONFIRM_SUCCESS_FROM_MULTI_TARGET_SOURCE, foreignFailedTargets,
+        MULTI_TARGET_SOURCE_TIERS,
+        new int[] {weights.CONFIRM_SUCCESS_FROM_MULTI_TARGET_SOURCE_6, weights.CONFIRM_SUCCESS_FROM_MULTI_TARGET_SOURCE_3},
+        detail);
+  }
+
+  /**
+   * Did the foreign-failed-target count cross into a higher multi-target tier with this
+   * attempt? The retroactive pass triggers exactly on these transitions - once per tier
+   * per window-epoch - instead of rescanning on every attempt from a hot source.
+   */
+  public static boolean crossedMultiTargetTier(int before, int now) {
+    for (int tier : MULTI_TARGET_SOURCE_TIERS) {
+      if (before < tier && now >= tier) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  private Severity severityOf(int score, Settings.PROTECTION.SCORING scoring) {
+    if (score >= scoring.THRESHOLD_CRITICAL) {
+      return Severity.CRITICAL;
+    } else if (score >= scoring.THRESHOLD_HIGH) {
+      return Severity.HIGH;
+    } else if (score >= scoring.THRESHOLD_SUSPICIOUS) {
+      return Severity.SUSPICIOUS;
+    } else if (score >= scoring.THRESHOLD_INFO) {
+      return Severity.INFO;
+    } else {
+      return Severity.NONE;
+    }
   }
 
   /**
@@ -179,8 +266,7 @@ public class RiskScorer {
       return 0;
     }
 
-    String storedSubnet = SubnetKey.ofLiteral(observation.getStoredLoginIp());
-    if (storedSubnet == null || storedSubnet.equals(observation.getSubnetKey())) {
+    if (!SubnetKey.isForeign(observation.getStoredLoginIp(), observation.getSubnetKey())) {
       return 0;
     }
 
