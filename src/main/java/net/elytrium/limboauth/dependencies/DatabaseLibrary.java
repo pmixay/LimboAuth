@@ -148,21 +148,6 @@ public enum DatabaseLibrary {
     return this.pooledSource(this.stringGetter.getJdbcString(dir, hostname, database), user, password);
   }
 
-  /**
-   * Connection source for an explicit JDBC url, for auxiliary plugin-local databases
-   * (e.g. the protection event store). Deliberately SKIPS the engine's one-time
-   * main-database work - the H2 v1 -&gt; v2 dump/restore must only ever target the main
-   * database file, never an auxiliary one.
-   */
-  public ConnectionSource connectToORM(String jdbc, String user, String password)
-      throws ReflectiveOperationException, IOException, SQLException, URISyntaxException {
-    if (this.driver.getOriginal() == null) {
-      this.initDriver();
-    }
-
-    return this.pooledSource(jdbc, user, password);
-  }
-
   private IsolatedClassLoader initDriver() throws ReflectiveOperationException, IOException, SQLException, URISyntaxException {
     IsolatedClassLoader classLoader = new IsolatedClassLoader(new URL[] {this.baseLibrary.getClassLoaderURL()});
     Class<?> driverClass = classLoader.loadClass(

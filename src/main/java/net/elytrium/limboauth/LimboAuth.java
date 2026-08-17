@@ -113,7 +113,6 @@ import net.elytrium.limboauth.listener.AuthListener;
 import net.elytrium.limboauth.listener.BackendEndpointsListener;
 import net.elytrium.limboauth.model.RegisteredPlayer;
 import net.elytrium.limboauth.model.SQLRuntimeException;
-import net.elytrium.limboauth.protection.ProtectionManager;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.serializer.ComponentSerializer;
 import net.kyori.adventure.title.Title;
@@ -168,7 +167,6 @@ public class LimboAuth {
   private final LimboFactory factory;
   private final FloodgateApiHolder floodgateApi;
   private final Map<String, AuthSessionHandler> authenticatingPlayers;
-  private final ProtectionManager protectionManager;
 
   @Nullable
   private Component loginPremium;
@@ -210,9 +208,6 @@ public class LimboAuth {
     } else {
       this.floodgateApi = null;
     }
-
-    // Created once so in-memory attack state survives config reloads; reload() rebinds the DB parts.
-    this.protectionManager = new ProtectionManager(this, logger);
   }
 
   @Subscribe
@@ -234,7 +229,6 @@ public class LimboAuth {
     metrics.addCustomChart(new SimplePie("totp_enabled", () -> String.valueOf(Settings.IMP.MAIN.ENABLE_TOTP)));
     metrics.addCustomChart(new SimplePie("dimension", () -> String.valueOf(Settings.IMP.MAIN.DIMENSION)));
     metrics.addCustomChart(new SimplePie("save_uuid", () -> String.valueOf(Settings.IMP.MAIN.SAVE_UUID)));
-    metrics.addCustomChart(new SimplePie("protection_enabled", () -> String.valueOf(Settings.IMP.PROTECTION.ENABLED)));
     metrics.addCustomChart(new SingleLineChart("registered_players", () -> Math.toIntExact(this.playerDao.countOf())));
 
     this.server.getScheduler().buildTask(this, () -> {
@@ -358,8 +352,6 @@ public class LimboAuth {
     } catch (SQLException e) {
       throw new SQLRuntimeException(e);
     }
-
-    this.protectionManager.reload();
 
     CommandManager manager = this.server.getCommandManager();
     manager.unregister("unregister");
@@ -964,10 +956,6 @@ public class LimboAuth {
 
   public Dao<RegisteredPlayer, String> getPlayerDao() {
     return this.playerDao;
-  }
-
-  public ProtectionManager getProtectionManager() {
-    return this.protectionManager;
   }
 
   public Path getDataDirectory() {
